@@ -1,8 +1,13 @@
 use bevy::{prelude::*, render::texture::ImageSettings, utils::HashMap};
+use bevy_prototype_lyon::prelude::*;
 use rand::{
     distributions::{Distribution, Uniform},
     Rng,
 };
+
+const MAIN_LAYER: f32 = 2.;
+const DRAG_LAYER: f32 = 5.;
+const SHAPE_LAYER: f32 = 7.;
 
 fn main() {
     App::new()
@@ -10,15 +15,17 @@ fn main() {
         .insert_resource(MousePosition(None))
         .add_event::<SpawnSlimeEvent>()
         .add_plugins(DefaultPlugins)
+        .add_plugin(ShapePlugin)
         .add_startup_system(setup)
         .add_startup_system(spawn_background_tiles)
         .add_system(animate_sprites)
         .add_system(sync_mouse_position)
-        .add_system(begin_slime_drag)
-        .add_system(update_slime_drag)
-        .add_system(end_slime_drag)
+        .add_system(slime_drag_animation)
+        .add_system(draw_activation_circle)
+        .add_system(drag_start)
+        .add_system(drag_update)
+        .add_system(drag_end)
         .add_system(slime_spawner)
-        .add_system(highlight_under_cursor)
         .add_system(spawn_slime_on_keypress)
         .run();
 }
@@ -30,6 +37,95 @@ struct MousePosition(Option<Vec2>);
 struct SlimeResources {
     texture_atlases: HashMap<SlimeColor, Handle<TextureAtlas>>,
 }
+
+#[derive(Component)]
+struct Draggable {
+    activation_radius: f32,
+}
+
+#[derive(Component)]
+struct DragActive(bool);
+
+#[derive(Component)]
+struct ActivationCircle;
+
+fn draw_activation_circle(
+    mut commands: Commands,
+    draggable_query: Query<(Entity, &Draggable), Added<Draggable>>,
+) {
+    for (entity, draggable) in &draggable_query {
+        let shape = shapes::Circle {
+            radius: draggable.activation_radius,
+            ..default()
+        };
+        let circle_entity = commands
+            .spawn_bundle(GeometryBuilder::build_as(
+                &shape,
+                DrawMode::Outlined {
+                    fill_mode: FillMode::color(Color::NONE),
+                    outline_mode: StrokeMode::new(Color::GRAY, 3.0),
+                },
+                Transform::from_xyz(0., 0., SHAPE_LAYER),
+            ))
+            .insert(ActivationCircle)
+            .id();
+        commands.entity(entity).add_child(circle_entity);
+    }
+}
+
+fn drag_start(
+    mouse_input: Res<Input<MouseButton>>,
+    mouse_position: Res<MousePosition>,
+    mut draggable_query: Query<(&mut Transform, &Draggable, &mut DragActive)>,
+) {
+    if mouse_input.just_pressed(MouseButton::Left) {
+        let mouse_pos = mouse_position.0.unwrap();
+        for (mut transform, draggable, mut drag_active) in &mut draggable_query {
+            if transform.translation.truncate().distance(mouse_pos) < draggable.activation_radius {
+                drag_active.0 = true;
+                transform.translation.z = DRAG_LAYER;
+                // only drag one thing at a time.
+                break;
+            }
+        }
+    }
+}
+
+fn drag_update(
+    mouse_position: Res<MousePosition>,
+    mut draggable_query: Query<(&DragActive, &mut Transform), With<Draggable>>,
+) {
+    if let Some(mouse_coords) = mouse_position.0 {
+        for (drag_active, mut transform) in &mut draggable_query {
+            if drag_active.0 {
+                transform.translation.x = mouse_coords.x;
+                transform.translation.y = mouse_coords.y;
+            }
+        }
+    }
+}
+
+fn drag_end(
+    mouse_input: Res<Input<MouseButton>>,
+    mut draggable_query: Query<(&mut Transform, &mut DragActive, &Children)>,
+    mut circle_query: Query<&mut DrawMode, With<ActivationCircle>>,
+) {
+    if mouse_input.just_released(MouseButton::Left) {
+        for (mut transform, mut drag_active, children) in &mut draggable_query {
+            drag_active.0 = false;
+            transform.translation.z = MAIN_LAYER;
+            for &child in children.iter() {
+                if let Ok(mut draw_mode) = circle_query.get_mut(child) {
+                    if let DrawMode::Stroke(StrokeMode { ref mut color, .. }) = *draw_mode {
+                        *color = Color::GRAY;
+                    }
+                }
+            }
+        }
+    }
+}
+
+const SLIME_RADIUS_PX: f32 = 14.;
 
 #[derive(Clone, Copy, PartialEq, Eq, Hash)]
 enum SlimeColor {
@@ -59,6 +155,7 @@ impl SlimeColor {
 #[derive(Component)]
 struct Slime {
     color: SlimeColor,
+    size: u32,
 }
 
 #[derive(Component)]
@@ -72,6 +169,9 @@ struct SpriteAnimation {
     frames: Vec<usize>,
     current: usize,
 }
+
+#[derive(Component)]
+struct SlimeAnimation;
 
 fn animate_sprites(
     time: Res<Time>,
@@ -111,7 +211,7 @@ fn spawn_background_tiles(
                 },
                 texture_atlas: background_atlas_handle.clone(),
                 transform: Transform::from_translation(Vec3::new(0., 0., 1.))
-                    * Transform::from_scale(Vec3::splat(5.))
+                    * Transform::from_scale(Vec3::splat(2.))
                     * Transform::from_translation(Vec3::new(x as f32 * 32., y as f32 * 32., 0.)),
                 ..default()
             });
@@ -119,81 +219,45 @@ fn spawn_background_tiles(
     }
 }
 
-fn highlight_under_cursor(
-    mouse_position: Res<MousePosition>,
-    slime_query: Query<(&Transform, &Children), (With<Slime>, Without<Dragging>)>,
-    mut sprite_query: Query<&mut TextureAtlasSprite>,
-) {
-    if let Some(mouse_coords) = mouse_position.0 {
-        for (transform, children) in &slime_query {
-            if transform.translation.truncate().distance(mouse_coords) < 27. {
-                for &child in children.iter() {
-                    let mut sprite = sprite_query.get_mut(child).unwrap();
-                    sprite.color = Color::rgba(0., 0., 0., 0.5);
-                }
-            } else {
-                for &child in children.iter() {
-                    let mut sprite = sprite_query.get_mut(child).unwrap();
-                    sprite.color = Color::WHITE;
-                }
-            }
-        }
-    }
-}
-
-fn begin_slime_drag(
-    mut commands: Commands,
-    mouse_position: Res<MousePosition>,
-    buttons: Res<Input<MouseButton>>,
-    slime_query: Query<(Entity, &Transform, &Children), With<Slime>>,
+fn slime_drag_animation(
+    slime_query: Query<(&Slime, &DragActive, &Children), Changed<DragActive>>,
     mut sprite_query: Query<(&mut SpriteAnimation, &mut TextureAtlasSprite)>,
 ) {
-    if buttons.just_pressed(MouseButton::Left) {
-        let mouse_coords: Vec2 = mouse_position.0.unwrap();
-        for (entity, transform, children) in &slime_query {
-            if transform.translation.truncate().distance(mouse_coords) < 27. {
-                println!("clicked");
-                for &child in children.iter() {
-                    let (mut animation, mut sprite) = sprite_query.get_mut(child).unwrap();
+    for (_slime, drag_active, children) in &slime_query {
+        for &child in children.iter() {
+            if drag_active.0 {
+                if let Ok((mut animation, mut sprite)) = sprite_query.get_mut(child) {
                     sprite.color = Color::rgba(1., 1., 1., 0.5);
                     animation.frames = vec![24, 25, 26, 27];
                 }
-                commands.entity(entity).insert(Dragging);
+            } else {
+                if let Ok((mut animation, mut sprite)) = sprite_query.get_mut(child) {
+                    sprite.color = Color::WHITE;
+                    animation.frames = vec![0, 1, 2, 3];
+                }
             }
         }
     }
 }
 
-fn update_slime_drag(
-    mouse_position: Res<MousePosition>,
-    mut slime_query: Query<&mut Transform, With<Dragging>>,
-) {
-    if let Some(mouse_coords) = mouse_position.0 {
-        for mut transform in &mut slime_query {
-            transform.translation.x = mouse_coords.x;
-            transform.translation.y = mouse_coords.y;
-        }
-    }
-}
-
-fn end_slime_drag(
-    mut commands: Commands,
-    mouse_position: Res<MousePosition>,
-    mouse_buttons: Res<Input<MouseButton>>,
-    slime_query: Query<(Entity, &Children), (With<Slime>, With<Dragging>)>,
-    mut sprite_query: Query<(&mut SpriteAnimation, &mut TextureAtlasSprite)>,
-) {
-    if mouse_position.0.is_none() || mouse_buttons.just_released(MouseButton::Left) {
-        for (entity, children) in &slime_query {
-            commands.entity(entity).remove::<Dragging>();
-            for &child in children.iter() {
-                let (mut animation, mut sprite) = sprite_query.get_mut(child).unwrap();
-                sprite.color = Color::default();
-                animation.frames = vec![0, 1, 2, 3];
-            }
-        }
-    }
-}
+// fn end_slime_drag(
+//     mut commands: Commands,
+//     mouse_position: Res<MousePosition>,
+//     mouse_buttons: Res<Input<MouseButton>>,
+//     slime_query: Query<(Entity, &Children), (With<Slime>, With<Dragging>)>,
+//     mut sprite_query: Query<(&mut SpriteAnimation, &mut TextureAtlasSprite)>,
+// ) {
+//     if mouse_position.0.is_none() || mouse_buttons.just_released(MouseButton::Left) {
+//         for (entity, children) in &slime_query {
+//             commands.entity(entity).remove::<Dragging>();
+//             for &child in children.iter() {
+//                 let (mut animation, mut sprite) = sprite_query.get_mut(child).unwrap();
+//                 sprite.color = Color::default();
+//                 animation.frames = vec![0, 1, 2, 3];
+//             }
+//         }
+//     }
+// }
 
 struct SpawnSlimeEvent {
     slime: Slime,
@@ -206,14 +270,16 @@ fn slime_spawner(
     mut events: EventReader<SpawnSlimeEvent>,
 ) {
     for ev in events.iter() {
-        let mut rng = rand::thread_rng();
         commands
             .spawn_bundle(SpatialBundle {
-                transform: Transform::from_scale(Vec3::splat(rng.gen_range(3..7) as f32))
-                    .with_translation(ev.position.extend(0.)),
+                transform: Transform::from_translation(ev.position.extend(0.)),
                 ..default()
             })
             .insert(Slime { ..ev.slime })
+            .insert(Draggable {
+                activation_radius: ev.slime.size as f32 * SLIME_RADIUS_PX,
+            })
+            .insert(DragActive(false))
             .with_children(|parent| {
                 parent
                     .spawn_bundle(SpriteSheetBundle {
@@ -222,7 +288,12 @@ fn slime_spawner(
                             .get(&ev.slime.color)
                             .expect("texture atlas not found")
                             .clone(),
-                        transform: Transform::from_xyz(-15., 2., 2.),
+                        transform: Transform::from_xyz(
+                            -14.5 * ev.slime.size as f32,
+                            1. * ev.slime.size as f32,
+                            2.,
+                        )
+                        .with_scale(Vec3::splat(ev.slime.size as f32)),
                         ..default()
                     })
                     .insert(AnimationTimer(Timer::from_seconds(0.2, true)))
@@ -242,13 +313,15 @@ fn spawn_slime_on_keypress(
     if keys.just_pressed(KeyCode::Space) {
         let mut rng = rand::thread_rng();
         let window = windows.get_primary().unwrap();
-        let x = rng.gen_range(0.0..window.width()) - window.width() / 2.;
-        let y = rng.gen_range(0.0..window.height()) - window.height() / 2.;
-        let color = SlimeColor::ALL[rng.gen_range(0..8)];
-        events.send(SpawnSlimeEvent {
-            slime: Slime { color },
-            position: Vec2::new(x, y),
-        });
+        for size in [1, 3, 5, 7] {
+            let x = rng.gen_range(0.0..window.width()) - window.width() / 2.;
+            let y = rng.gen_range(0.0..window.height()) - window.height() / 2.;
+            let color = SlimeColor::ALL[rng.gen_range(0..8)];
+            events.send(SpawnSlimeEvent {
+                slime: Slime { color, size },
+                position: 0.5 * Vec2::new(x, y),
+            });
+        }
     }
 }
 
