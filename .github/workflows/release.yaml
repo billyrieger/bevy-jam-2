@@ -7,7 +7,7 @@ on:
 
 env:
   # update with the name of the main binary
-  binary: game
+  binary: bevy-jam-2
 
 
 jobs:
