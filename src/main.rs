@@ -5,9 +5,16 @@ use rand::{
     Rng,
 };
 
+const WINDOW_WIDTH: f32 = 1280.;
+const WINDOW_HEIGHT: f32 = 720.;
+
 const MAIN_LAYER: f32 = 2.;
 const DRAG_LAYER: f32 = 5.;
 const SHAPE_LAYER: f32 = 7.;
+
+const SLIME_RADIUS_PX: f32 = 14.;
+const SLIME_SIZE_MIN: u32 = 2;
+const SLIME_SIZE_MAX: u32 = 6;
 
 fn main() {
     App::new()
@@ -15,6 +22,7 @@ fn main() {
         .insert_resource(ImageSettings::default_nearest())
         .insert_resource(MousePosition(None))
         .add_event::<SpawnSlimeEvent>()
+        .add_event::<CombineEvent>()
         .add_plugins(DefaultPlugins)
         .add_plugin(ShapePlugin)
         .add_startup_system(setup)
@@ -22,12 +30,15 @@ fn main() {
         .add_system(animate_sprites)
         .add_system(sync_mouse_position)
         .add_system(slime_drag_animation)
-        .add_system(draw_activation_circle)
+        .add_system(add_activation_circle)
         .add_system(drag_start)
         .add_system(drag_update)
         .add_system(drag_end)
+        .add_system(mouse_hover)
+        .add_system(color_on_hover)
         .add_system(slime_spawner)
-        .add_system(spawn_slime_on_keypress)
+        .add_system(spawn_slimes_on_keypress)
+        .add_system(combine)
         .run();
 }
 
@@ -40,7 +51,7 @@ struct SlimeResources {
 }
 
 #[derive(Component)]
-struct Draggable {
+struct Interactable {
     activation_radius: f32,
 }
 
@@ -53,13 +64,54 @@ struct HoverActive(bool);
 #[derive(Component)]
 struct ActivationCircle;
 
-fn draw_activation_circle(
-    mut commands: Commands,
-    draggable_query: Query<(Entity, &Draggable), Added<Draggable>>,
+fn mouse_hover(
+    mouse_position: Res<MousePosition>,
+    mut interactable: Query<(&Transform, &Interactable, &DragActive, &mut HoverActive)>,
 ) {
-    for (entity, draggable) in &draggable_query {
+    if let Some(mouse_pos) = mouse_position.0 {
+        for (transform, interactable, drag_active, mut hover_active) in interactable.iter_mut() {
+            if transform.translation.truncate().distance(mouse_pos) < interactable.activation_radius
+                && !drag_active.0
+            {
+                if !hover_active.0 {
+                    hover_active.0 = true;
+                }
+            } else {
+                if hover_active.0 {
+                    hover_active.0 = false;
+                }
+            }
+        }
+    }
+}
+
+fn color_on_hover(
+    hover_query: Query<(&HoverActive, &Children), Changed<HoverActive>>,
+    mut circle_query: Query<&mut DrawMode, With<ActivationCircle>>,
+) {
+    for (hover_active, children) in hover_query.iter() {
+        for &child in children.iter() {
+            if let Ok(DrawMode::Outlined {
+                ref mut fill_mode, ..
+            }) = circle_query.get_mut(child).as_deref_mut()
+            {
+                *fill_mode = if hover_active.0 {
+                    FillMode::color(Color::rgba(0.5, 0.5, 0.5, 0.25))
+                } else {
+                    FillMode::color(Color::NONE)
+                }
+            }
+        }
+    }
+}
+
+fn add_activation_circle(
+    mut commands: Commands,
+    interactable_query: Query<(Entity, &Interactable), Added<Interactable>>,
+) {
+    for (entity, interactable) in &interactable_query {
         let shape = shapes::Circle {
-            radius: draggable.activation_radius,
+            radius: interactable.activation_radius,
             ..default()
         };
         let circle_entity = commands
@@ -80,7 +132,7 @@ fn draw_activation_circle(
 fn drag_start(
     mouse_input: Res<Input<MouseButton>>,
     mouse_position: Res<MousePosition>,
-    mut draggable_query: Query<(&mut Transform, &Draggable, &mut DragActive)>,
+    mut draggable_query: Query<(&mut Transform, &Interactable, &mut DragActive)>,
 ) {
     if mouse_input.just_pressed(MouseButton::Left) {
         let mouse_pos = mouse_position.0.unwrap();
@@ -97,7 +149,7 @@ fn drag_start(
 
 fn drag_update(
     mouse_position: Res<MousePosition>,
-    mut draggable_query: Query<(&DragActive, &mut Transform), With<Draggable>>,
+    mut draggable_query: Query<(&DragActive, &mut Transform), With<Interactable>>,
 ) {
     if let Some(mouse_coords) = mouse_position.0 {
         for (drag_active, mut transform) in &mut draggable_query {
@@ -109,21 +161,90 @@ fn drag_update(
     }
 }
 
+struct CombineEvent {
+    location: Vec2,
+    base: Entity,
+    addition: Entity,
+}
+
 fn drag_end(
+    mouse_position: Res<MousePosition>,
     mouse_input: Res<Input<MouseButton>>,
-    mut draggable_query: Query<(&mut Transform, &mut DragActive)>,
+    mut query: Query<(Entity, &mut Transform, &mut DragActive, &HoverActive)>,
+    mut events: EventWriter<CombineEvent>,
 ) {
     if mouse_input.just_released(MouseButton::Left) {
-        for (mut transform, mut drag_active) in &mut draggable_query {
+        let mut addition_entity: Option<Entity> = None;
+        let mut base_entities: Vec<Entity> = vec![];
+        for (entity, mut transform, mut drag_active, hover_active) in &mut query {
             if drag_active.0 {
                 drag_active.0 = false;
                 transform.translation.z = MAIN_LAYER;
+                addition_entity = Some(entity);
+            }
+            if hover_active.0 {
+                base_entities.push(entity);
+            }
+        }
+        if let Some(addition) = addition_entity {
+            for base in base_entities {
+                events.send(CombineEvent {
+                    base,
+                    addition,
+                    location: mouse_position.0.unwrap(),
+                })
             }
         }
     }
 }
 
-const SLIME_RADIUS_PX: f32 = 14.;
+fn combine(
+    mut commands: Commands,
+    mut combine_events: EventReader<CombineEvent>,
+    slime_query: Query<&Slime>,
+    mut slime_events: EventWriter<SpawnSlimeEvent>,
+) {
+    let mut rng = rand::thread_rng();
+    for ev in combine_events.iter() {
+        if let Ok([base_slime, addition_slime]) = slime_query.get_many([ev.base, ev.addition]) {
+            let new_size = base_slime.size + addition_slime.size;
+            if new_size > SLIME_SIZE_MAX {
+                let overflow = (new_size - SLIME_SIZE_MAX).clamp(SLIME_SIZE_MIN, SLIME_SIZE_MAX);
+                for _ in 0..2 {
+                    let offset = Vec2::new(rng.gen(), rng.gen()) * 20.;
+                    slime_events.send(SpawnSlimeEvent {
+                        slime: Slime {
+                            color: SlimeColor::Yellow,
+                            size: overflow,
+                        },
+                        position: ev.location + offset,
+                    });
+                }
+                for _ in 0..2 {
+                    let offset = Vec2::new(rng.gen(), rng.gen()) * 20.;
+                    slime_events.send(SpawnSlimeEvent {
+                        slime: Slime {
+                            color: SlimeColor::Blue,
+                            size: 3,
+                        },
+                        position: ev.location + offset,
+                    });
+                }
+            } else {
+                let offset = Vec2::new(rng.gen(), rng.gen()) * 20.;
+                slime_events.send(SpawnSlimeEvent {
+                    slime: Slime {
+                        color: SlimeColor::Red,
+                        size: new_size,
+                    },
+                    position: ev.location + offset,
+                });
+            }
+        }
+        commands.entity(ev.base).despawn_recursive();
+        commands.entity(ev.addition).despawn_recursive();
+    }
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 enum SlimeColor {
@@ -239,13 +360,11 @@ fn slime_drag_animation(
 ) {
     for (_slime, drag_active, children) in &slime_query {
         for &child in children.iter() {
-            if drag_active.0 {
-                if let Ok((mut animation, mut sprite)) = sprite_query.get_mut(child) {
+            if let Ok((mut animation, mut sprite)) = sprite_query.get_mut(child) {
+                if drag_active.0 {
                     sprite.color = Color::rgba(1., 1., 1., 0.5);
                     *animation = SpriteAnimation::slime_drag();
-                }
-            } else {
-                if let Ok((mut animation, mut sprite)) = sprite_query.get_mut(child) {
+                } else {
                     sprite.color = Color::WHITE;
                     *animation = SpriteAnimation::slime_idle();
                 }
@@ -271,7 +390,7 @@ fn slime_spawner(
                 ..default()
             })
             .insert(Slime { ..ev.slime })
-            .insert(Draggable {
+            .insert(Interactable {
                 activation_radius: ev.slime.size as f32 * SLIME_RADIUS_PX,
             })
             .insert(DragActive(false))
@@ -298,7 +417,7 @@ fn slime_spawner(
     }
 }
 
-fn spawn_slime_on_keypress(
+fn spawn_slimes_on_keypress(
     windows: Res<Windows>,
     keys: Res<Input<KeyCode>>,
     mut events: EventWriter<SpawnSlimeEvent>,
@@ -306,7 +425,7 @@ fn spawn_slime_on_keypress(
     if keys.just_pressed(KeyCode::Space) {
         let mut rng = rand::thread_rng();
         let window = windows.get_primary().unwrap();
-        for size in [2, 3, 4, 5, 6] {
+        for size in [2, 2, 2, 2, 2, 2, 2, 2] {
             let x = rng.gen_range(0.0..window.width()) - window.width() / 2.;
             let y = rng.gen_range(0.0..window.height()) - window.height() / 2.;
             let color = SlimeColor::ALL[rng.gen_range(0..8)];
