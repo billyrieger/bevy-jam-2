@@ -476,21 +476,18 @@ fn slime_spawner(
 
 fn spawn_initial_slimes(
     windows: Res<Windows>,
-    keys: Res<Input<KeyCode>>,
     mut events: EventWriter<SpawnSlimeEvent>,
 ) {
-    if keys.just_pressed(KeyCode::Space) {
-        let mut rng = rand::thread_rng();
-        let window = windows.get_primary().unwrap();
-        for size in [2, 2, 2, 2, 2, 2, 2, 2] {
-            let x = rng.gen_range(0.0..window.width()) - window.width() / 2.;
-            let y = rng.gen_range(0.0..window.height()) - window.height() / 2.;
-            let color = SlimeColor::ALL[rng.gen_range(0..8)];
-            events.send(SpawnSlimeEvent {
-                slime: Slime { color, size },
-                position: 0.5 * Vec2::new(x, y),
-            });
-        }
+    let mut rng = rand::thread_rng();
+    let window = windows.get_primary().unwrap();
+    for size in [2, 2, 2, 2, 2, 2, 2, 2] {
+        let x = rng.gen_range(0.0..window.width()) - window.width() / 2.;
+        let y = rng.gen_range(0.0..window.height()) - window.height() / 2.;
+        let color = SlimeColor::ALL[rng.gen_range(0..8)];
+        events.send(SpawnSlimeEvent {
+            slime: Slime { color, size },
+            position: 0.5 * Vec2::new(x, y),
+        });
     }
 }
 
