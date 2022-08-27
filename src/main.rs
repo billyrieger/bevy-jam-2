@@ -17,7 +17,7 @@ const SHAPE_LAYER: f32 = 7.;
 
 const SLIME_RADIUS_PX: f32 = 14.;
 const SLIME_SIZE_MIN: u32 = 1;
-const SLIME_SIZE_MAX: u32 = 6;
+const SLIME_SIZE_MAX: u32 = 5;
 
 fn main() {
     App::new()
@@ -47,6 +47,8 @@ fn main() {
         .add_system(slime_spawner)
         .add_system(random_movement)
         .add_system(combine)
+        .add_system(sync_slime_text_position)
+        .add_system(despawn_old_slime_text)
         .run();
 }
 
@@ -240,23 +242,19 @@ fn combine(
     for ev in combine_events.iter() {
         if let Ok([base_slime, addition_slime]) = slime_query.get_many([ev.base, ev.addition]) {
             let new_size = base_slime.size + addition_slime.size;
+            let new_color = addition_slime.color;
+            let random_color = SlimeColor::ALL[rng.gen_range(0..8)];
             if new_size > SLIME_SIZE_MAX {
                 let overflow = (new_size - SLIME_SIZE_MAX).clamp(SLIME_SIZE_MIN, SLIME_SIZE_MAX);
+                for (color, size) in [
+                    (new_color, SLIME_SIZE_MAX / 2),
+                    (new_color, SLIME_SIZE_MAX - SLIME_SIZE_MAX / 2),
+                    (new_color, overflow),
+                    (random_color, 1),
+                ] {
                     let offset = Vec2::new(rng.gen(), rng.gen()) * 20.;
                     slime_events.send(SpawnSlimeEvent {
-                        slime: Slime {
-                            color: SlimeColor::Yellow,
-                            size: overflow,
-                        },
-                        position: ev.location + offset,
-                    });
-                for _ in 0..2 {
-                    let offset = Vec2::new(rng.gen(), rng.gen()) * 20.;
-                    slime_events.send(SpawnSlimeEvent {
-                        slime: Slime {
-                            color: SlimeColor::Blue,
-                            size: SLIME_SIZE_MAX / 2,
-                        },
+                        slime: Slime { color, size },
                         position: ev.location + offset,
                     });
                 }
@@ -264,7 +262,7 @@ fn combine(
                 let offset = Vec2::new(rng.gen(), rng.gen()) * 20.;
                 slime_events.send(SpawnSlimeEvent {
                     slime: Slime {
-                        color: SlimeColor::Red,
+                        color: new_color,
                         size: new_size,
                     },
                     position: ev.location + offset,
@@ -340,6 +338,11 @@ impl SpriteAnimation {
 
 #[derive(Component)]
 struct SlimeAnimation;
+
+#[derive(Component)]
+struct SlimeText {
+    slime: Entity,
+}
 
 fn animate_sprites(
     time: Res<Time>,
@@ -424,13 +427,14 @@ struct SpawnSlimeEvent {
 
 fn slime_spawner(
     mut commands: Commands,
+    asset_server: Res<AssetServer>,
     slime_resources: Res<SlimeResources>,
     mut events: EventReader<SpawnSlimeEvent>,
 ) {
     for ev in events.iter() {
         let scale = 1. + ev.slime.size as f32;
         let radius_px = scale * SLIME_RADIUS_PX;
-        commands
+        let slime_entity = commands
             .spawn_bundle(SpatialBundle {
                 transform: Transform::from_translation(ev.position.extend(0.)),
                 ..default()
@@ -456,6 +460,15 @@ fn slime_spawner(
                 linear_damping: 2.,
                 ..default()
             })
+            // .insert_bundle(NodeBundle {
+            //     style: Style {
+            //         size: Size::new(Val::Percent(100.0), Val::Percent(100.0)),
+            //         justify_content: JustifyContent::SpaceBetween,
+            //         ..default()
+            //     },
+            //     color: Color::NONE.into(),
+            //     ..default()
+            // })
             .with_children(|parent| {
                 parent
                     .spawn_bundle(SpriteSheetBundle {
@@ -464,28 +477,89 @@ fn slime_spawner(
                             .get(&ev.slime.color)
                             .expect("texture atlas not found")
                             .clone(),
-                        transform: Transform::from_xyz(-14.5 * scale, 1. * scale, 2.)
+                        transform: Transform::from_xyz(-14.5 * scale, 1. * scale, MAIN_LAYER)
                             .with_scale(Vec3::splat(scale)),
                         ..default()
                     })
                     .insert(AnimationTimer(Timer::from_seconds(0.2, true)))
                     .insert(SpriteAnimation::slime_idle());
+            })
+            .id();
+        let lvl_text = TextSection {
+            value: "LVL ".to_owned(),
+            style: TextStyle {
+                font: asset_server.load("fonts/Kenney Pixel Square.ttf"),
+                font_size: 16.,
+                color: Color::rgba(1., 1., 1., 0.5),
+            },
+        };
+        let number_text = TextSection {
+            value: format!("{}", ev.slime.size),
+            style: TextStyle {
+                font: asset_server.load("fonts/Kenney Pixel Square.ttf"),
+                font_size: 32.,
+                color: Color::rgba(1., 1., 1., 0.5),
+            },
+        };
+        commands
+            .spawn_bundle(TextBundle {
+                node: Node {
+                    size: Vec2::new(radius_px * 2., radius_px * 2.),
+                    ..default()
+                },
+                text: Text::from_sections([lvl_text, number_text]),
+                style: Style {
+                    position_type: PositionType::Absolute,
+                    ..default()
+                },
+                // transform: Transform::from_translation(Vec3::new(0., 0., 10.)),
+                ..default()
+            })
+            .insert(SlimeText {
+                slime: slime_entity,
             });
     }
 }
 
-fn spawn_initial_slimes(
-    windows: Res<Windows>,
-    mut events: EventWriter<SpawnSlimeEvent>,
+fn sync_slime_text_position(
+    mut text_query: Query<(&mut Style, &SlimeText)>,
+    slime_query: Query<(&Transform, &Slime)>,
 ) {
+    for (mut style, slime_text) in &mut text_query {
+        if let Ok((transform, slime)) = slime_query.get(slime_text.slime) {
+            let x = transform.translation.x;
+            let y = transform.translation.y;
+            style.position = UiRect {
+                left: Val::Px(WINDOW_WIDTH / 2. + x),
+                top: Val::Px(
+                    WINDOW_HEIGHT / 2. - y - (1. + slime.size as f32) * SLIME_RADIUS_PX - 16.,
+                ),
+                ..default()
+            };
+        }
+    }
+}
+
+fn despawn_old_slime_text(
+    mut commands: Commands,
+    mut text_query: Query<(Entity, &SlimeText)>,
+    slime_query: Query<&Slime>,
+) {
+    for (entity, slime_text) in &mut text_query {
+        if slime_query.get(slime_text.slime).is_err() {
+            commands.entity(entity).despawn_recursive();
+        }
+    }
+}
+
+fn spawn_initial_slimes(windows: Res<Windows>, mut events: EventWriter<SpawnSlimeEvent>) {
     let mut rng = rand::thread_rng();
     let window = windows.get_primary().unwrap();
-    for size in [2, 2, 2, 2, 2, 2, 2, 2] {
+    for &color in SlimeColor::ALL.iter() {
         let x = rng.gen_range(0.0..window.width()) - window.width() / 2.;
         let y = rng.gen_range(0.0..window.height()) - window.height() / 2.;
-        let color = SlimeColor::ALL[rng.gen_range(0..8)];
         events.send(SpawnSlimeEvent {
-            slime: Slime { color, size },
+            slime: Slime { color, size: 1 },
             position: 0.5 * Vec2::new(x, y),
         });
     }
