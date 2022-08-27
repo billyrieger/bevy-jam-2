@@ -8,6 +8,7 @@ edition = "2021"
 [dependencies]
 bevy = { version = "0.8.0", default-features = true }
 bevy_prototype_lyon = "0.6.0"
+bevy_rapier2d = { version = "0.16.2", default_features = true, features = ["wasm-bindgen"] }
 rand = "0.8.5"
 
 [profile.dev.package."*"]

@@ -1,12 +1,15 @@
 use bevy::{prelude::*, render::texture::ImageSettings, utils::HashMap};
 use bevy_prototype_lyon::prelude::*;
+use bevy_rapier2d::prelude::*;
 use rand::{
     distributions::{Distribution, Uniform},
-    Rng,
+    thread_rng, Rng,
 };
 
 const WINDOW_WIDTH: f32 = 1280.;
 const WINDOW_HEIGHT: f32 = 720.;
+
+const PIXELS_PER_METER: f32 = 30.;
 
 const MAIN_LAYER: f32 = 2.;
 const DRAG_LAYER: f32 = 5.;
@@ -25,7 +28,11 @@ fn main() {
         .add_event::<CombineEvent>()
         .add_plugins(DefaultPlugins)
         .add_plugin(ShapePlugin)
+        .add_plugin(RapierPhysicsPlugin::<NoUserData>::pixels_per_meter(
+            PIXELS_PER_METER,
+        ))
         .add_startup_system(setup)
+        .add_startup_system(setup_physics)
         .add_startup_system(spawn_background_tiles)
         .add_system(animate_sprites)
         .add_system(sync_mouse_position)
@@ -37,6 +44,7 @@ fn main() {
         .add_system(mouse_hover)
         .add_system(color_on_hover)
         .add_system(slime_spawner)
+        .add_system(random_movement)
         .add_system(spawn_slimes_on_keypress)
         .add_system(combine)
         .run();
@@ -96,9 +104,9 @@ fn color_on_hover(
             }) = circle_query.get_mut(child).as_deref_mut()
             {
                 *fill_mode = if hover_active.0 {
-                    FillMode::color(Color::rgba(0.5, 0.5, 0.5, 0.25))
+                    bevy_prototype_lyon::prelude::FillMode::color(Color::rgba(0.5, 0.5, 0.5, 0.25))
                 } else {
-                    FillMode::color(Color::NONE)
+                    bevy_prototype_lyon::prelude::FillMode::color(Color::NONE)
                 }
             }
         }
@@ -118,7 +126,7 @@ fn add_activation_circle(
             .spawn_bundle(GeometryBuilder::build_as(
                 &shape,
                 DrawMode::Outlined {
-                    fill_mode: FillMode::color(Color::NONE),
+                    fill_mode: bevy_prototype_lyon::prelude::FillMode::color(Color::NONE),
                     outline_mode: StrokeMode::new(Color::GRAY, 3.0),
                 },
                 Transform::from_xyz(0., 0., SHAPE_LAYER),
@@ -132,14 +140,22 @@ fn add_activation_circle(
 fn drag_start(
     mouse_input: Res<Input<MouseButton>>,
     mouse_position: Res<MousePosition>,
-    mut draggable_query: Query<(&mut Transform, &Interactable, &mut DragActive)>,
+    mut draggable_query: Query<(
+        &mut Transform,
+        &Interactable,
+        &mut DragActive,
+        &mut CollisionGroups,
+    )>,
 ) {
     if mouse_input.just_pressed(MouseButton::Left) {
         let mouse_pos = mouse_position.0.unwrap();
-        for (mut transform, draggable, mut drag_active) in &mut draggable_query {
+        for (mut transform, draggable, mut drag_active, mut collision_groups) in
+            &mut draggable_query
+        {
             if transform.translation.truncate().distance(mouse_pos) < draggable.activation_radius {
                 drag_active.0 = true;
                 transform.translation.z = DRAG_LAYER;
+                collision_groups.filters = 0;
                 // only drag one thing at a time.
                 break;
             }
@@ -170,19 +186,35 @@ struct CombineEvent {
 fn drag_end(
     mouse_position: Res<MousePosition>,
     mouse_input: Res<Input<MouseButton>>,
-    mut query: Query<(Entity, &mut Transform, &mut DragActive, &HoverActive)>,
+    mut query: Query<(
+        Entity,
+        &mut Transform,
+        &mut DragActive,
+        &HoverActive,
+        &mut CollisionGroups,
+        &mut Velocity,
+    )>,
     mut events: EventWriter<CombineEvent>,
 ) {
     if mouse_input.just_released(MouseButton::Left) {
         let mut addition_entity: Option<Entity> = None;
         let mut base_entity: Option<Entity> = None;
-        for (entity, mut transform, mut drag_active, hover_active) in &mut query {
+        for (
+            entity,
+            mut transform,
+            mut drag_active,
+            hover_active,
+            mut collision_groups,
+            mut velocity,
+        ) in &mut query
+        {
             if drag_active.0 {
                 drag_active.0 = false;
                 transform.translation.z = MAIN_LAYER;
+                collision_groups.filters = !0;
+                *velocity = Velocity::zero();
                 addition_entity = Some(entity);
-            }
-            else if hover_active.0 {
+            } else if hover_active.0 {
                 base_entity = Some(entity);
             }
         }
@@ -276,7 +308,10 @@ struct Slime {
 }
 
 #[derive(Component)]
-struct Dragging;
+struct RandomMovement {
+    chance_to_move: f32,
+    speed: f32,
+}
 
 #[derive(Component, Deref, DerefMut)]
 struct AnimationTimer(Timer);
@@ -371,6 +406,16 @@ fn slime_drag_animation(
     }
 }
 
+fn random_movement(mut query: Query<(&RandomMovement, &mut Velocity)>) {
+    let mut rng = thread_rng();
+    for (random_movement, mut velocity) in &mut query {
+        if rng.gen::<f32>() < random_movement.chance_to_move {
+            let angle = rng.gen::<f32>() * std::f32::consts::TAU;
+            *velocity = Velocity::linear(Vec2::from_angle(angle) * random_movement.speed);
+        }
+    }
+}
+
 struct SpawnSlimeEvent {
     slime: Slime,
     position: Vec2,
@@ -382,6 +427,7 @@ fn slime_spawner(
     mut events: EventReader<SpawnSlimeEvent>,
 ) {
     for ev in events.iter() {
+        let radius_px = ev.slime.size as f32 * SLIME_RADIUS_PX;
         commands
             .spawn_bundle(SpatialBundle {
                 transform: Transform::from_translation(ev.position.extend(0.)),
@@ -389,10 +435,25 @@ fn slime_spawner(
             })
             .insert(Slime { ..ev.slime })
             .insert(Interactable {
-                activation_radius: ev.slime.size as f32 * SLIME_RADIUS_PX,
+                activation_radius: radius_px,
             })
             .insert(DragActive(false))
             .insert(HoverActive(false))
+            .insert(RandomMovement {
+                chance_to_move: 5e-3,
+                speed: 50.,
+            })
+            // rapier components
+            .insert(RigidBody::Dynamic)
+            .insert(Collider::ball(radius_px))
+            .insert(LockedAxes::ROTATION_LOCKED)
+            .insert(CollisionGroups::default())
+            .insert(Restitution::coefficient(0.5))
+            .insert(Velocity::zero())
+            .insert(Damping {
+                linear_damping: 0.7,
+                ..default()
+            })
             .with_children(|parent| {
                 parent
                     .spawn_bundle(SpriteSheetBundle {
@@ -465,6 +526,23 @@ fn setup(
     commands.insert_resource(SlimeResources {
         texture_atlases: slime_texture_atlases,
     });
+}
+
+fn setup_physics(mut rapier_config: ResMut<RapierConfiguration>, mut commands: Commands) {
+    rapier_config.gravity = Vec2::ZERO;
+    let wall_size = 20.;
+    for (width_x, width_y, pos_x, pos_y) in [
+        (wall_size, WINDOW_HEIGHT, -WINDOW_WIDTH / 2., 0.),
+        (wall_size, WINDOW_HEIGHT, WINDOW_WIDTH / 2., 0.),
+        (WINDOW_WIDTH, wall_size, 0., -WINDOW_HEIGHT / 2.),
+        (WINDOW_WIDTH, wall_size, 0., WINDOW_HEIGHT / 2.),
+    ] {
+        commands
+            .spawn()
+            .insert(Collider::cuboid(width_x / 2., width_y / 2.))
+            .insert(CollisionGroups::default())
+            .insert_bundle(TransformBundle::from(Transform::from_xyz(pos_x, pos_y, 0.)));
+    }
 }
 
 #[derive(Component)]
