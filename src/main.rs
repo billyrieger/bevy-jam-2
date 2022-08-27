@@ -19,12 +19,15 @@ const SLIME_RADIUS_PX: f32 = 14.;
 const SLIME_SIZE_MIN: u32 = 1;
 const SLIME_SIZE_MAX: u32 = 5;
 
+const SPIDER_RADIUS_PX: f32 = 20.;
+
 fn main() {
     App::new()
         .insert_resource(WindowDescriptor { ..default() })
         .insert_resource(ImageSettings::default_nearest())
         .insert_resource(MousePosition(None))
         .add_event::<SpawnSlimeEvent>()
+        .add_event::<SpawnSpiderEvent>()
         .add_event::<CombineEvent>()
         .add_plugins(DefaultPlugins)
         .add_plugin(ShapePlugin)
@@ -49,6 +52,7 @@ fn main() {
         .add_system(combine)
         .add_system(sync_slime_text_position)
         .add_system(despawn_old_slime_text)
+        .add_system(spider_spawner)
         .run();
 }
 
@@ -58,6 +62,17 @@ struct MousePosition(Option<Vec2>);
 #[derive(Default)]
 struct SlimeResources {
     texture_atlases: HashMap<SlimeColor, Handle<TextureAtlas>>,
+}
+
+#[derive(Default)]
+struct SpiderResources {
+    texture_atlas: Handle<TextureAtlas>,
+}
+
+#[derive(Component)]
+struct Spider {
+    level: u32,
+    weakness: SlimeColor,
 }
 
 #[derive(Component)]
@@ -76,12 +91,17 @@ struct ActivationCircle;
 
 fn mouse_hover(
     mouse_position: Res<MousePosition>,
-    mut interactable: Query<(&Transform, &Interactable, &DragActive, &mut HoverActive)>,
+    mut interactable: Query<(
+        &Transform,
+        &Interactable,
+        Option<&DragActive>,
+        &mut HoverActive,
+    )>,
 ) {
     if let Some(mouse_pos) = mouse_position.0 {
         for (transform, interactable, drag_active, mut hover_active) in interactable.iter_mut() {
             if transform.translation.truncate().distance(mouse_pos) < interactable.activation_radius
-                && !drag_active.0
+                && !drag_active.map(|x| x.0).unwrap_or(false)
             {
                 if !hover_active.0 {
                     hover_active.0 = true;
@@ -334,6 +354,13 @@ impl SpriteAnimation {
             current: 0,
         }
     }
+
+    fn spider_walk() -> Self {
+        Self {
+            frames: vec![16, 17, 18, 19, 20, 21],
+            current: 0,
+        }
+    }
 }
 
 #[derive(Component)]
@@ -422,6 +449,11 @@ fn random_movement(mut query: Query<(&RandomMovement, &mut Velocity)>) {
 
 struct SpawnSlimeEvent {
     slime: Slime,
+    position: Vec2,
+}
+
+struct SpawnSpiderEvent {
+    spider: Spider,
     position: Vec2,
 }
 
@@ -521,21 +553,99 @@ fn slime_spawner(
     }
 }
 
+fn spider_spawner(
+    mut commands: Commands,
+    asset_server: Res<AssetServer>,
+    spider_resources: Res<SpiderResources>,
+    mut events: EventReader<SpawnSpiderEvent>,
+) {
+    for ev in events.iter() {
+        let scale = 1. + ev.spider.level as f32;
+        let radius_px = scale * SPIDER_RADIUS_PX;
+        let spider_entity = commands
+            .spawn_bundle(SpatialBundle {
+                transform: Transform::from_translation(ev.position.extend(0.)),
+                ..default()
+            })
+            .insert(Spider { ..ev.spider })
+            .insert(Interactable {
+                activation_radius: radius_px,
+            })
+            .insert(HoverActive(false))
+            // rapier components
+            .insert(RigidBody::KinematicVelocityBased)
+            .insert(Collider::ball(radius_px))
+            .insert(LockedAxes::ROTATION_LOCKED)
+            .insert(CollisionGroups::default())
+            .insert(Restitution::coefficient(0.5))
+            .insert(Velocity::linear(Vec2::new(10., 0.)))
+            .with_children(|parent| {
+                parent
+                    .spawn_bundle(SpriteSheetBundle {
+                        texture_atlas: spider_resources.texture_atlas.clone(),
+                        transform: Transform::from_translation(Vec3::new(0., 0., MAIN_LAYER))
+                            .with_scale(Vec3::splat(scale)),
+                        ..default()
+                    })
+                    .insert(AnimationTimer(Timer::from_seconds(0.2, true)))
+                    .insert(SpriteAnimation::spider_walk());
+            })
+            .id();
+        // let lvl_text = TextSection {
+        //     value: "LVL ".to_owned(),
+        //     style: TextStyle {
+        //         font: asset_server.load("fonts/Kenney Pixel Square.ttf"),
+        //         font_size: 16.,
+        //         color: Color::rgba(1., 1., 1., 0.5),
+        //     },
+        // };
+        // let number_text = TextSection {
+        //     value: format!("{}", ev.slime.size),
+        //     style: TextStyle {
+        //         font: asset_server.load("fonts/Kenney Pixel Square.ttf"),
+        //         font_size: 32.,
+        //         color: Color::rgba(1., 1., 1., 0.5),
+        //     },
+        // };
+        // commands
+        //     .spawn_bundle(TextBundle {
+        //         node: Node {
+        //             size: Vec2::new(radius_px * 2., radius_px * 2.),
+        //             ..default()
+        //         },
+        //         text: Text::from_sections([lvl_text, number_text]),
+        //         style: Style {
+        //             position_type: PositionType::Absolute,
+        //             ..default()
+        //         },
+        //         // transform: Transform::from_translation(Vec3::new(0., 0., 10.)),
+        //         ..default()
+        //     })
+        //     .insert(SlimeText {
+        //         slime: slime_entity,
+        //     });
+    }
+}
+
 fn sync_slime_text_position(
-    mut text_query: Query<(&mut Style, &SlimeText)>,
+    mut text_query: Query<(&mut Text, &mut Style, &SlimeText)>,
     slime_query: Query<(&Transform, &Slime)>,
 ) {
-    for (mut style, slime_text) in &mut text_query {
+    for (mut text, mut style, slime_text) in &mut text_query {
         if let Ok((transform, slime)) = slime_query.get(slime_text.slime) {
             let x = transform.translation.x;
             let y = transform.translation.y;
             style.position = UiRect {
-                left: Val::Px(WINDOW_WIDTH / 2. + x),
+                left: Val::Px(
+                    WINDOW_WIDTH / 2. + x - (1. + slime.size as f32) * SLIME_RADIUS_PX / 2.,
+                ),
                 top: Val::Px(
                     WINDOW_HEIGHT / 2. - y - (1. + slime.size as f32) * SLIME_RADIUS_PX - 16.,
                 ),
                 ..default()
             };
+            text.sections[0].style.font_size = 12. + slime.size as f32 * 4.;
+            text.sections[1].style.font_size = 24. + slime.size as f32 * 8.;
         }
     }
 }
@@ -594,6 +704,13 @@ fn setup(
     }
     commands.insert_resource(SlimeResources {
         texture_atlases: slime_texture_atlases,
+    });
+
+    let texture = asset_server.load("spider/spider_origin.png");
+    let atlas = TextureAtlas::from_grid(texture, Vec2::new(40.0, 40.0), 8, 7);
+    let atlas_handle = texture_atlases.add(atlas);
+    commands.insert_resource(SpiderResources {
+        texture_atlas: atlas_handle,
     });
 }
 
