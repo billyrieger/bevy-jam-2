@@ -175,25 +175,23 @@ fn drag_end(
 ) {
     if mouse_input.just_released(MouseButton::Left) {
         let mut addition_entity: Option<Entity> = None;
-        let mut base_entities: Vec<Entity> = vec![];
+        let mut base_entity: Option<Entity> = None;
         for (entity, mut transform, mut drag_active, hover_active) in &mut query {
             if drag_active.0 {
                 drag_active.0 = false;
                 transform.translation.z = MAIN_LAYER;
                 addition_entity = Some(entity);
             }
-            if hover_active.0 {
-                base_entities.push(entity);
+            else if hover_active.0 {
+                base_entity = Some(entity);
             }
         }
-        if let Some(addition) = addition_entity {
-            for base in base_entities {
-                events.send(CombineEvent {
-                    base,
-                    addition,
-                    location: mouse_position.0.unwrap(),
-                })
-            }
+        if let (Some(addition), Some(base)) = (addition_entity, base_entity) {
+            events.send(CombineEvent {
+                base,
+                addition,
+                location: mouse_position.0.unwrap(),
+            })
         }
     }
 }
