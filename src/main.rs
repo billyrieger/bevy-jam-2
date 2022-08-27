@@ -16,7 +16,7 @@ const DRAG_LAYER: f32 = 5.;
 const SHAPE_LAYER: f32 = 7.;
 
 const SLIME_RADIUS_PX: f32 = 14.;
-const SLIME_SIZE_MIN: u32 = 2;
+const SLIME_SIZE_MIN: u32 = 1;
 const SLIME_SIZE_MAX: u32 = 6;
 
 fn main() {
@@ -34,6 +34,7 @@ fn main() {
         .add_startup_system(setup)
         .add_startup_system(setup_physics)
         .add_startup_system(spawn_background_tiles)
+        .add_startup_system(spawn_initial_slimes)
         .add_system(animate_sprites)
         .add_system(sync_mouse_position)
         .add_system(slime_drag_animation)
@@ -45,7 +46,6 @@ fn main() {
         .add_system(color_on_hover)
         .add_system(slime_spawner)
         .add_system(random_movement)
-        .add_system(spawn_slimes_on_keypress)
         .add_system(combine)
         .run();
 }
@@ -104,7 +104,7 @@ fn color_on_hover(
             }) = circle_query.get_mut(child).as_deref_mut()
             {
                 *fill_mode = if hover_active.0 {
-                    bevy_prototype_lyon::prelude::FillMode::color(Color::rgba(0.5, 0.5, 0.5, 0.25))
+                    bevy_prototype_lyon::prelude::FillMode::color(Color::rgba(0.5, 0.5, 0.5, 0.5))
                 } else {
                     bevy_prototype_lyon::prelude::FillMode::color(Color::NONE)
                 }
@@ -127,7 +127,7 @@ fn add_activation_circle(
                 &shape,
                 DrawMode::Outlined {
                     fill_mode: bevy_prototype_lyon::prelude::FillMode::color(Color::NONE),
-                    outline_mode: StrokeMode::new(Color::GRAY, 3.0),
+                    outline_mode: StrokeMode::new(Color::NONE, 3.0),
                 },
                 Transform::from_xyz(0., 0., SHAPE_LAYER),
             ))
@@ -144,16 +144,18 @@ fn drag_start(
         &mut Transform,
         &Interactable,
         &mut DragActive,
+        &mut HoverActive,
         &mut CollisionGroups,
     )>,
 ) {
     if mouse_input.just_pressed(MouseButton::Left) {
         let mouse_pos = mouse_position.0.unwrap();
-        for (mut transform, draggable, mut drag_active, mut collision_groups) in
+        for (mut transform, draggable, mut drag_active, mut hover_active, mut collision_groups) in
             &mut draggable_query
         {
             if transform.translation.truncate().distance(mouse_pos) < draggable.activation_radius {
                 drag_active.0 = true;
+                hover_active.0 = false;
                 transform.translation.z = DRAG_LAYER;
                 collision_groups.filters = 0;
                 // only drag one thing at a time.
@@ -240,7 +242,6 @@ fn combine(
             let new_size = base_slime.size + addition_slime.size;
             if new_size > SLIME_SIZE_MAX {
                 let overflow = (new_size - SLIME_SIZE_MAX).clamp(SLIME_SIZE_MIN, SLIME_SIZE_MAX);
-                for _ in 0..2 {
                     let offset = Vec2::new(rng.gen(), rng.gen()) * 20.;
                     slime_events.send(SpawnSlimeEvent {
                         slime: Slime {
@@ -249,13 +250,12 @@ fn combine(
                         },
                         position: ev.location + offset,
                     });
-                }
                 for _ in 0..2 {
                     let offset = Vec2::new(rng.gen(), rng.gen()) * 20.;
                     slime_events.send(SpawnSlimeEvent {
                         slime: Slime {
                             color: SlimeColor::Blue,
-                            size: 3,
+                            size: SLIME_SIZE_MAX / 2,
                         },
                         position: ev.location + offset,
                     });
@@ -411,7 +411,8 @@ fn random_movement(mut query: Query<(&RandomMovement, &mut Velocity)>) {
     for (random_movement, mut velocity) in &mut query {
         if rng.gen::<f32>() < random_movement.chance_to_move {
             let angle = rng.gen::<f32>() * std::f32::consts::TAU;
-            *velocity = Velocity::linear(Vec2::from_angle(angle) * random_movement.speed);
+            *velocity =
+                Velocity::linear(velocity.linvel + Vec2::from_angle(angle) * random_movement.speed);
         }
     }
 }
@@ -427,7 +428,8 @@ fn slime_spawner(
     mut events: EventReader<SpawnSlimeEvent>,
 ) {
     for ev in events.iter() {
-        let radius_px = ev.slime.size as f32 * SLIME_RADIUS_PX;
+        let scale = 1. + ev.slime.size as f32;
+        let radius_px = scale * SLIME_RADIUS_PX;
         commands
             .spawn_bundle(SpatialBundle {
                 transform: Transform::from_translation(ev.position.extend(0.)),
@@ -441,7 +443,7 @@ fn slime_spawner(
             .insert(HoverActive(false))
             .insert(RandomMovement {
                 chance_to_move: 5e-3,
-                speed: 50.,
+                speed: 200.,
             })
             // rapier components
             .insert(RigidBody::Dynamic)
@@ -451,7 +453,7 @@ fn slime_spawner(
             .insert(Restitution::coefficient(0.5))
             .insert(Velocity::zero())
             .insert(Damping {
-                linear_damping: 0.7,
+                linear_damping: 2.,
                 ..default()
             })
             .with_children(|parent| {
@@ -462,12 +464,8 @@ fn slime_spawner(
                             .get(&ev.slime.color)
                             .expect("texture atlas not found")
                             .clone(),
-                        transform: Transform::from_xyz(
-                            -14.5 * ev.slime.size as f32,
-                            1. * ev.slime.size as f32,
-                            2.,
-                        )
-                        .with_scale(Vec3::splat(ev.slime.size as f32)),
+                        transform: Transform::from_xyz(-14.5 * scale, 1. * scale, 2.)
+                            .with_scale(Vec3::splat(scale)),
                         ..default()
                     })
                     .insert(AnimationTimer(Timer::from_seconds(0.2, true)))
@@ -476,7 +474,7 @@ fn slime_spawner(
     }
 }
 
-fn spawn_slimes_on_keypress(
+fn spawn_initial_slimes(
     windows: Res<Windows>,
     keys: Res<Input<KeyCode>>,
     mut events: EventWriter<SpawnSlimeEvent>,
