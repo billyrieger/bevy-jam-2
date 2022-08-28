@@ -1,6 +1,7 @@
-use bevy::{prelude::*, render::texture::ImageSettings, utils::HashMap};
+use bevy::{prelude::*, render::texture::ImageSettings, time::Stopwatch, utils::HashMap};
 use bevy_prototype_lyon::prelude::*;
 use bevy_rapier2d::prelude::*;
+use itertools::Itertools;
 use rand::{
     distributions::{Distribution, Uniform},
     thread_rng, Rng,
@@ -21,6 +22,8 @@ const SLIME_SIZE_MAX: u32 = 5;
 
 const SPIDER_RADIUS_PX: f32 = 18.;
 
+const GARDEN_X: f32 = -WINDOW_WIDTH / 2. + 32. * 5.;
+
 fn main() {
     App::new()
         .insert_resource(WindowDescriptor { ..default() })
@@ -34,32 +37,187 @@ fn main() {
         .add_plugin(RapierPhysicsPlugin::<NoUserData>::pixels_per_meter(
             PIXELS_PER_METER,
         ))
+        .add_state(AppState::PreGame)
         .add_startup_system(setup)
+        // .add_startup_system(draw_garden_line)
         .add_startup_system(setup_physics)
         .add_startup_system(spawn_background_tiles)
-        .add_startup_system(spawn_initial_slimes)
-        .add_startup_system(setup_spider_spawn_timer)
-        .add_system(animate_sprites)
         .add_system(sync_mouse_position)
-        .add_system(slime_drag_animation)
-        .add_system(add_activation_circle)
-        .add_system(drag_start)
-        .add_system(drag_update)
-        .add_system(drag_end)
-        .add_system(mouse_hover)
-        .add_system(color_on_hover)
-        .add_system(slime_spawner)
-        .add_system(random_movement)
-        .add_system(combine)
-        // .add_system_to_stage(CoreStage::PostUpdate, sync_slime_text_position)
-        // .add_system_to_stage(CoreStage::PostUpdate, sync_spider_text_position)
-        .add_system(sync_slime_text_position)
-        .add_system(sync_spider_text_position)
         .add_system(despawn_old_slime_text)
         .add_system(despawn_old_spider_text)
-        .add_system(spider_spawner)
-        .add_system(spider_spawn_timer)
+        .add_system_set(SystemSet::on_enter(AppState::PreGame).with_system(setup_main_menu))
+        .add_system_set(SystemSet::on_update(AppState::PreGame).with_system(start_game_on_click))
+        .add_system_set(SystemSet::on_exit(AppState::PreGame).with_system(despawn_main_menu))
+        .add_system_set(
+            SystemSet::on_enter(AppState::InGame)
+                .with_system(spawn_initial_slimes)
+                .with_system(setup_spider_spawn_timer)
+                .with_system(reset_score),
+        )
+        .add_system_set(
+            SystemSet::on_update(AppState::InGame)
+                .with_system(animate_sprites)
+                .with_system(slime_drag_animation)
+                .with_system(add_activation_circle)
+                .with_system(drag_start)
+                .with_system(drag_update)
+                .with_system(drag_end)
+                .with_system(mouse_hover)
+                .with_system(color_on_hover)
+                .with_system(slime_spawner)
+                .with_system(random_movement)
+                .with_system(combine)
+                .with_system(sync_slime_text_position)
+                .with_system(sync_spider_text_position)
+                .with_system(spider_spawner)
+                .with_system(spider_spawn_timer)
+                .with_system(end_if_spider_reaches_garden),
+        )
+        .add_system_set(
+            SystemSet::on_enter(AppState::GameOver)
+                .with_system(setup_game_over_menu)
+                .with_system(set_all_velocities_to_zero)
+                .with_system(remove_all_hover)
+                .with_system(despawn_other_text),
+        )
+        .add_system_set(SystemSet::on_update(AppState::GameOver).with_system(restart_game_on_click))
+        .add_system_set(SystemSet::on_exit(AppState::GameOver).with_system(despawn_game_over_menu).with_system(despawn_all_entities))
         .run();
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+enum AppState {
+    PreGame,
+    InGame,
+    GameOver,
+}
+
+#[derive(Component)]
+struct MainMenu;
+
+#[derive(Component)]
+struct GameOverMenu;
+
+const INSTRUCTIONS: [&str; 4] = [
+    "Drag  slimes  together  to  form  new  slimes.",
+    "Drag  slimes  onto  spiders  to  attack  them.",
+    "Defeat  spiders  before  they  reach  the  garden.",
+    "Click anywhere to begin.",
+];
+
+fn setup_main_menu(mut commands: Commands, asset_server: Res<AssetServer>) {
+    commands
+        .spawn_bundle(NodeBundle {
+            style: Style {
+                size: Size::new(Val::Percent(100.0), Val::Percent(100.0)),
+                justify_content: JustifyContent::Center,
+                align_items: AlignItems::Center,
+                ..default()
+            },
+            color: Color::rgba(0.0, 0.0, 0.0, 0.9).into(),
+            ..default()
+        })
+        .insert(MainMenu)
+        .with_children(|parent| {
+            parent.spawn_bundle(
+                TextBundle::from_section(
+                    INSTRUCTIONS.iter().join("\n\n"),
+                    TextStyle {
+                        font: asset_server.load("fonts/Kenney Pixel.ttf"),
+                        font_size: 32.,
+                        color: Color::WHITE,
+                    },
+                )
+                .with_style(Style {
+                    margin: UiRect::all(Val::Px(5.0)),
+                    ..default()
+                }),
+            );
+        });
+}
+
+fn start_game_on_click(mouse_input: Res<Input<MouseButton>>, mut state: ResMut<State<AppState>>) {
+    if mouse_input.just_pressed(MouseButton::Left) {
+        state.set(AppState::InGame).expect("could not set state");
+    }
+}
+
+fn despawn_main_menu(mut commands: Commands, main_menu_query: Query<Entity, With<MainMenu>>) {
+    for entity in &main_menu_query {
+        commands.entity(entity).despawn_recursive();
+    }
+}
+
+fn setup_game_over_menu(
+    mut commands: Commands,
+    asset_server: Res<AssetServer>,
+    score: Res<ScoreResource>,
+) {
+    commands
+        .spawn_bundle(NodeBundle {
+            style: Style {
+                size: Size::new(Val::Percent(100.0), Val::Percent(100.0)),
+                justify_content: JustifyContent::Center,
+                align_items: AlignItems::Center,
+                ..default()
+            },
+            color: Color::rgba(0.0, 0.0, 0.0, 0.9).into(),
+            ..default()
+        })
+        .insert(GameOverMenu)
+        .with_children(|parent| {
+            parent.spawn_bundle(
+                TextBundle::from_section(
+                    format!(
+                        "GAME  OVER\n\nSpiders  defeated:  {}\n\nClick anywhere to play again.",
+                        score.spiders_killed
+                    ),
+                    TextStyle {
+                        font: asset_server.load("fonts/Kenney Pixel.ttf"),
+                        font_size: 32.,
+                        color: Color::WHITE,
+                    },
+                )
+                .with_style(Style {
+                    margin: UiRect::all(Val::Px(5.0)),
+                    ..default()
+                }),
+            );
+        });
+}
+
+fn restart_game_on_click(mut mouse_input: ResMut<Input<MouseButton>>, mut state: ResMut<State<AppState>>) {
+    if mouse_input.just_pressed(MouseButton::Left) {
+        mouse_input.reset_all();
+        state.set(AppState::InGame).expect("could not set state");
+    }
+}
+
+fn despawn_game_over_menu(
+    mut commands: Commands,
+    game_over_menu_query: Query<Entity, With<GameOverMenu>>,
+) {
+    for entity in &game_over_menu_query {
+        commands.entity(entity).despawn_recursive();
+    }
+}
+
+fn despawn_all_entities(
+    mut commands: Commands,
+    query: Query<Entity, Or<(With<Slime>, With<Spider>)>>,
+) {
+    for entity in &query {
+        commands.entity(entity).despawn_recursive();
+    }
+}
+
+fn despawn_other_text(
+    mut commands: Commands,
+    query: Query<Entity, Or<(With<SlimeText>, With<SpiderText>)>>,
+) {
+    for entity in &query {
+        commands.entity(entity).despawn_recursive();
+    }
 }
 
 #[derive(Default)]
@@ -76,6 +234,9 @@ struct SpiderResources {
 }
 
 #[derive(Component)]
+struct GardenLine;
+
+#[derive(Component)]
 struct Spider {
     level: u32,
     weakness: SlimeColor,
@@ -84,9 +245,10 @@ struct Spider {
 
 struct SpiderSpawnTimer(Timer);
 
-struct AdditionalSlimeTimer(Timer);
-
-struct SurvivalTimer(Timer);
+struct ScoreResource {
+    survival_time: Stopwatch,
+    spiders_killed: u32,
+}
 
 #[derive(Component)]
 struct Interactable {
@@ -266,6 +428,7 @@ fn drag_end(
 
 fn combine(
     mut commands: Commands,
+    mut score: ResMut<ScoreResource>,
     mut combine_events: EventReader<CombineEvent>,
     slime_query: Query<&Slime>,
     spider_query: Query<&Spider>,
@@ -306,11 +469,23 @@ fn combine(
         } else if let (Ok(spider), Ok(slime)) =
             (spider_query.get(ev.base), slime_query.get(ev.addition))
         {
-            println!("asfd");
-            if spider.level == slime.size && spider.weakness == slime.color {
+            if spider.level <= slime.size && spider.weakness == slime.color {
+                score.spiders_killed += 1;
                 commands.entity(ev.base).despawn_recursive();
-                commands.entity(ev.addition).despawn_recursive();
             }
+            for size in [slime.size / 2, slime.size - slime.size / 2] {
+                if size > 0 {
+                    let offset = Vec2::new(rng.gen(), rng.gen()) * 20.;
+                    slime_events.send(SpawnSlimeEvent {
+                        slime: Slime {
+                            color: slime.color,
+                            size,
+                        },
+                        position: ev.location + offset,
+                    });
+                }
+            }
+            commands.entity(ev.addition).despawn_recursive();
         }
     }
 }
@@ -478,10 +653,7 @@ fn spawn_background_tiles(
         for y in -10..=10 {
             let index = [12, 13, 14, 20, 21, 22, 28, 29, 30][rng.gen_range(0..9)];
             commands.spawn_bundle(SpriteSheetBundle {
-                sprite: TextureAtlasSprite {
-                    index,
-                    ..default()
-                },
+                sprite: TextureAtlasSprite { index, ..default() },
                 texture_atlas: background_atlas_handle.clone(),
                 transform: Transform::from_translation(Vec3::new(0., 0., 1.))
                     * Transform::from_scale(Vec3::splat(2.))
@@ -494,10 +666,7 @@ fn spawn_background_tiles(
         for y in -10..=10 {
             let index = [40, 41, 48, 49][rng.gen_range(0..4)];
             commands.spawn_bundle(SpriteSheetBundle {
-                sprite: TextureAtlasSprite {
-                    index,
-                    ..default()
-                },
+                sprite: TextureAtlasSprite { index, ..default() },
                 texture_atlas: background_atlas_handle.clone(),
                 transform: Transform::from_translation(Vec3::new(0., 0., 1.))
                     * Transform::from_scale(Vec3::splat(2.))
@@ -889,6 +1058,43 @@ fn spider_spawn_timer(
     }
 }
 
+// fn draw_garden_line(mut commands: Commands) {
+//     let shape = shapes::Line(
+//         Vec2::new(GARDEN_X, WINDOW_HEIGHT / 2.),
+//         Vec2::new(GARDEN_X, -WINDOW_HEIGHT / 2.),
+//     );
+//     commands
+//         .spawn_bundle(GeometryBuilder::build_as(
+//             &shape,
+//             DrawMode::Stroke(StrokeMode::new(Color::BLACK, 3.0)),
+//             Transform::from_xyz(0., 0., SHAPE_LAYER),
+//         ))
+//         .insert(GardenLine);
+// }
+
+fn end_if_spider_reaches_garden(
+    mut state: ResMut<State<AppState>>,
+    spider_query: Query<(&Transform, &Spider)>,
+) {
+    for (transform, _spider) in &spider_query {
+        if transform.translation.x < GARDEN_X {
+            state.set(AppState::GameOver).unwrap();
+        }
+    }
+}
+
+fn set_all_velocities_to_zero(mut query: Query<&mut Velocity>) {
+    for mut velocity in &mut query {
+        *velocity = Velocity::zero();
+    }
+}
+
+fn remove_all_hover(mut query: Query<&mut DrawMode, With<ActivationCircle>>) {
+    for mut draw_mode in &mut query {
+        *draw_mode = DrawMode::Fill(bevy_prototype_lyon::prelude::FillMode::color(Color::NONE));
+    }
+}
+
 fn setup(
     mut commands: Commands,
     asset_server: Res<AssetServer>,
@@ -926,6 +1132,13 @@ fn setup(
     let atlas_handle = texture_atlases.add(atlas);
     commands.insert_resource(SpiderResources {
         texture_atlas: atlas_handle,
+    });
+}
+
+fn reset_score(mut commands: Commands) {
+    commands.insert_resource(ScoreResource {
+        survival_time: Stopwatch::new(),
+        spiders_killed: 0,
     });
 }
 
