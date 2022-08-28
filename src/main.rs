@@ -19,7 +19,7 @@ const SLIME_RADIUS_PX: f32 = 14.;
 const SLIME_SIZE_MIN: u32 = 1;
 const SLIME_SIZE_MAX: u32 = 5;
 
-const SPIDER_RADIUS_PX: f32 = 20.;
+const SPIDER_RADIUS_PX: f32 = 18.;
 
 fn main() {
     App::new()
@@ -38,6 +38,7 @@ fn main() {
         .add_startup_system(setup_physics)
         .add_startup_system(spawn_background_tiles)
         .add_startup_system(spawn_initial_slimes)
+        .add_startup_system(setup_spider_spawn_timer)
         .add_system(animate_sprites)
         .add_system(sync_mouse_position)
         .add_system(slime_drag_animation)
@@ -50,9 +51,14 @@ fn main() {
         .add_system(slime_spawner)
         .add_system(random_movement)
         .add_system(combine)
+        // .add_system_to_stage(CoreStage::PostUpdate, sync_slime_text_position)
+        // .add_system_to_stage(CoreStage::PostUpdate, sync_spider_text_position)
         .add_system(sync_slime_text_position)
+        .add_system(sync_spider_text_position)
         .add_system(despawn_old_slime_text)
+        .add_system(despawn_old_spider_text)
         .add_system(spider_spawner)
+        .add_system(spider_spawn_timer)
         .run();
 }
 
@@ -73,7 +79,14 @@ struct SpiderResources {
 struct Spider {
     level: u32,
     weakness: SlimeColor,
+    speed: f32,
 }
+
+struct SpiderSpawnTimer(Timer);
+
+struct AdditionalSlimeTimer(Timer);
+
+struct SurvivalTimer(Timer);
 
 #[derive(Component)]
 struct Interactable {
@@ -210,27 +223,21 @@ struct CombineEvent {
 fn drag_end(
     mouse_position: Res<MousePosition>,
     mouse_input: Res<Input<MouseButton>>,
-    mut query: Query<(
+    mut drag_query: Query<(
         Entity,
         &mut Transform,
         &mut DragActive,
-        &HoverActive,
         &mut CollisionGroups,
         &mut Velocity,
     )>,
+    hover_query: Query<(Entity, &HoverActive)>,
     mut events: EventWriter<CombineEvent>,
 ) {
     if mouse_input.just_released(MouseButton::Left) {
         let mut addition_entity: Option<Entity> = None;
         let mut base_entity: Option<Entity> = None;
-        for (
-            entity,
-            mut transform,
-            mut drag_active,
-            hover_active,
-            mut collision_groups,
-            mut velocity,
-        ) in &mut query
+        for (entity, mut transform, mut drag_active, mut collision_groups, mut velocity) in
+            &mut drag_query
         {
             if drag_active.0 {
                 drag_active.0 = false;
@@ -238,8 +245,13 @@ fn drag_end(
                 collision_groups.filters = !0;
                 *velocity = Velocity::zero();
                 addition_entity = Some(entity);
-            } else if hover_active.0 {
+                break;
+            }
+        }
+        for (entity, hover_active) in &hover_query {
+            if hover_active.0 {
                 base_entity = Some(entity);
+                break;
             }
         }
         if let (Some(addition), Some(base)) = (addition_entity, base_entity) {
@@ -256,6 +268,7 @@ fn combine(
     mut commands: Commands,
     mut combine_events: EventReader<CombineEvent>,
     slime_query: Query<&Slime>,
+    spider_query: Query<&Spider>,
     mut slime_events: EventWriter<SpawnSlimeEvent>,
 ) {
     let mut rng = rand::thread_rng();
@@ -288,9 +301,17 @@ fn combine(
                     position: ev.location + offset,
                 });
             }
+            commands.entity(ev.base).despawn_recursive();
+            commands.entity(ev.addition).despawn_recursive();
+        } else if let (Ok(spider), Ok(slime)) =
+            (spider_query.get(ev.base), slime_query.get(ev.addition))
+        {
+            println!("asfd");
+            if spider.level == slime.size && spider.weakness == slime.color {
+                commands.entity(ev.base).despawn_recursive();
+                commands.entity(ev.addition).despawn_recursive();
+            }
         }
-        commands.entity(ev.base).despawn_recursive();
-        commands.entity(ev.addition).despawn_recursive();
     }
 }
 
@@ -300,7 +321,7 @@ enum SlimeColor {
     Green,
     Blue,
     Cyan,
-    Magenta,
+    Purple,
     Yellow,
     White,
     Black,
@@ -312,11 +333,37 @@ impl SlimeColor {
         Self::Green,
         Self::Blue,
         Self::Cyan,
-        Self::Magenta,
+        Self::Purple,
         Self::Yellow,
         Self::Black,
         Self::White,
     ];
+
+    fn name(&self) -> &'static str {
+        match self {
+            SlimeColor::Red => "red",
+            SlimeColor::Green => "green",
+            SlimeColor::Blue => "blue",
+            SlimeColor::Cyan => "cyan",
+            SlimeColor::Purple => "purple",
+            SlimeColor::Yellow => "yellow",
+            SlimeColor::White => "white",
+            SlimeColor::Black => "black",
+        }
+    }
+
+    fn color(&self) -> Color {
+        match self {
+            SlimeColor::Red => Color::rgb_u8(224, 84, 66),
+            SlimeColor::Green => Color::rgb_u8(79, 175, 73),
+            SlimeColor::Blue => Color::rgb_u8(69, 140, 192),
+            SlimeColor::Cyan => Color::rgb_u8(0, 200, 221),
+            SlimeColor::Purple => Color::rgb_u8(159, 84, 205),
+            SlimeColor::Yellow => Color::rgb_u8(232, 208, 85),
+            SlimeColor::White => Color::rgb_u8(217, 217, 217),
+            SlimeColor::Black => Color::rgb_u8(11, 11, 11),
+        }
+    }
 }
 
 #[derive(Debug, Component)]
@@ -371,6 +418,12 @@ struct SlimeText {
     slime: Entity,
 }
 
+#[derive(Component)]
+struct SpiderText {
+    spider: Entity,
+    above: bool,
+}
+
 fn animate_sprites(
     time: Res<Time>,
     mut query: Query<(
@@ -397,14 +450,52 @@ fn spawn_background_tiles(
     let background_texture = asset_server.load("tiles/TX Tileset Grass.png");
     let background_atlas = TextureAtlas::from_grid(background_texture, Vec2::new(32.0, 32.0), 8, 8);
     let background_atlas_handle = texture_atlases.add(background_atlas);
-    // the grass tiles are the first four rows, 4 * 8 = 32.
-    let index_distribution = Uniform::from(0..32);
+    // the grass tiles are the first four tiles of the first four rows, 4 * 4 = 16.
+    let index_distribution = Uniform::from(0..16);
     let mut rng = rand::thread_rng();
     for x in -10..=10 {
         for y in -10..=10 {
+            let index = index_distribution.sample(&mut rng);
+            let tile_row = index / 4;
+            let tile_col = index % 4;
+            let true_index = tile_row * 8 + tile_col;
             commands.spawn_bundle(SpriteSheetBundle {
                 sprite: TextureAtlasSprite {
-                    index: index_distribution.sample(&mut rng),
+                    index: true_index,
+                    ..default()
+                },
+                texture_atlas: background_atlas_handle.clone(),
+                transform: Transform::from_translation(Vec3::new(0., 0., 1.))
+                    * Transform::from_scale(Vec3::splat(2.))
+                    * Transform::from_translation(Vec3::new(x as f32 * 32., y as f32 * 32., 0.)),
+                ..default()
+            });
+        }
+    }
+    let left_col = -10;
+    let path_col = -7;
+    for x in left_col..(left_col + 3) {
+        for y in -10..=10 {
+            let index = [12, 13, 14, 20, 21, 22, 28, 29, 30][rng.gen_range(0..9)];
+            commands.spawn_bundle(SpriteSheetBundle {
+                sprite: TextureAtlasSprite {
+                    index,
+                    ..default()
+                },
+                texture_atlas: background_atlas_handle.clone(),
+                transform: Transform::from_translation(Vec3::new(0., 0., 1.))
+                    * Transform::from_scale(Vec3::splat(2.))
+                    * Transform::from_translation(Vec3::new(x as f32 * 32., y as f32 * 32., 0.)),
+                ..default()
+            });
+        }
+    }
+    for x in [path_col] {
+        for y in -10..=10 {
+            let index = [40, 41, 48, 49][rng.gen_range(0..4)];
+            commands.spawn_bundle(SpriteSheetBundle {
+                sprite: TextureAtlasSprite {
+                    index,
                     ..default()
                 },
                 texture_atlas: background_atlas_handle.clone(),
@@ -492,15 +583,6 @@ fn slime_spawner(
                 linear_damping: 2.,
                 ..default()
             })
-            // .insert_bundle(NodeBundle {
-            //     style: Style {
-            //         size: Size::new(Val::Percent(100.0), Val::Percent(100.0)),
-            //         justify_content: JustifyContent::SpaceBetween,
-            //         ..default()
-            //     },
-            //     color: Color::NONE.into(),
-            //     ..default()
-            // })
             .with_children(|parent| {
                 parent
                     .spawn_bundle(SpriteSheetBundle {
@@ -530,7 +612,7 @@ fn slime_spawner(
             style: TextStyle {
                 font: asset_server.load("fonts/Kenney Pixel Square.ttf"),
                 font_size: 32.,
-                color: Color::rgba(1., 1., 1., 0.5),
+                color: Color::WHITE,
             },
         };
         commands
@@ -578,52 +660,110 @@ fn spider_spawner(
             .insert(LockedAxes::ROTATION_LOCKED)
             .insert(CollisionGroups::default())
             .insert(Restitution::coefficient(0.5))
-            .insert(Velocity::linear(Vec2::new(10., 0.)))
+            .insert(Velocity::linear(Vec2::new(-ev.spider.speed, 0.)))
             .with_children(|parent| {
                 parent
                     .spawn_bundle(SpriteSheetBundle {
                         texture_atlas: spider_resources.texture_atlas.clone(),
-                        transform: Transform::from_translation(Vec3::new(0., 0., MAIN_LAYER))
-                            .with_scale(Vec3::splat(scale)),
+                        transform: Transform::from_translation(Vec3::new(-1., 0., MAIN_LAYER))
+                            .with_scale(Vec3::splat(scale))
+                            .with_rotation(Quat::from_axis_angle(
+                                Vec3::Z,
+                                -std::f32::consts::FRAC_PI_2,
+                            )),
                         ..default()
                     })
                     .insert(AnimationTimer(Timer::from_seconds(0.2, true)))
                     .insert(SpriteAnimation::spider_walk());
             })
             .id();
-        // let lvl_text = TextSection {
-        //     value: "LVL ".to_owned(),
-        //     style: TextStyle {
-        //         font: asset_server.load("fonts/Kenney Pixel Square.ttf"),
-        //         font_size: 16.,
-        //         color: Color::rgba(1., 1., 1., 0.5),
-        //     },
-        // };
-        // let number_text = TextSection {
-        //     value: format!("{}", ev.slime.size),
-        //     style: TextStyle {
-        //         font: asset_server.load("fonts/Kenney Pixel Square.ttf"),
-        //         font_size: 32.,
-        //         color: Color::rgba(1., 1., 1., 0.5),
-        //     },
-        // };
-        // commands
-        //     .spawn_bundle(TextBundle {
-        //         node: Node {
-        //             size: Vec2::new(radius_px * 2., radius_px * 2.),
-        //             ..default()
-        //         },
-        //         text: Text::from_sections([lvl_text, number_text]),
-        //         style: Style {
-        //             position_type: PositionType::Absolute,
-        //             ..default()
-        //         },
-        //         // transform: Transform::from_translation(Vec3::new(0., 0., 10.)),
-        //         ..default()
-        //     })
-        //     .insert(SlimeText {
-        //         slime: slime_entity,
-        //     });
+        let font = asset_server.load("fonts/Kenney Pixel Square.ttf");
+        let lvl_text = TextSection {
+            value: "LVL ".to_owned(),
+            style: TextStyle {
+                font: font.clone(),
+                font_size: 16.,
+                color: Color::rgba(1.0, 1.0, 1.0, 0.5),
+            },
+        };
+        let number_text = TextSection {
+            value: format!("{}", ev.spider.level),
+            style: TextStyle {
+                font: font.clone(),
+                font_size: 32.,
+                color: Color::WHITE,
+            },
+        };
+        let weakness_text = TextSection {
+            value: "WEAK TO ".to_owned(),
+            style: TextStyle {
+                font: font.clone(),
+                font_size: 16.,
+                color: Color::rgba(1.0, 1.0, 1.0, 0.5),
+            },
+        };
+        let color_text = TextSection {
+            value: ev.spider.weakness.name().to_owned(),
+            style: TextStyle {
+                font: font.clone(),
+                font_size: 32.,
+                color: ev.spider.weakness.color(),
+            },
+        };
+        commands
+            .spawn_bundle(TextBundle {
+                node: Node {
+                    size: Vec2::new(radius_px * 2., radius_px * 2.),
+                    ..default()
+                },
+                text: Text::from_sections([lvl_text, number_text]),
+                style: Style {
+                    position_type: PositionType::Absolute,
+                    position: UiRect {
+                        left: Val::Px(
+                            WINDOW_WIDTH / 2. + ev.position.x - scale * SPIDER_RADIUS_PX / 2.,
+                        ),
+                        top: Val::Px(
+                            WINDOW_HEIGHT / 2. - ev.position.y - scale * SPIDER_RADIUS_PX - 16.,
+                        ),
+                        ..default()
+                    },
+                    ..default()
+                },
+                ..default()
+            })
+            .insert(SpiderText {
+                spider: spider_entity,
+                above: true,
+            });
+        commands
+            .spawn_bundle(TextBundle {
+                node: Node {
+                    size: Vec2::new(radius_px * 2., radius_px * 2.),
+                    ..default()
+                },
+                text: Text::from_sections([weakness_text, color_text]),
+                style: Style {
+                    position_type: PositionType::Absolute,
+                    position: UiRect {
+                        left: Val::Px(
+                            WINDOW_WIDTH / 2. + ev.position.x
+                                - scale * SPIDER_RADIUS_PX / 2.
+                                - scale * 8.,
+                        ),
+                        top: Val::Px(
+                            WINDOW_HEIGHT / 2. - ev.position.y + scale * SPIDER_RADIUS_PX - 16.,
+                        ),
+                        ..default()
+                    },
+                    ..default()
+                },
+                ..default()
+            })
+            .insert(SpiderText {
+                spider: spider_entity,
+                above: false,
+            });
     }
 }
 
@@ -650,6 +790,36 @@ fn sync_slime_text_position(
     }
 }
 
+fn sync_spider_text_position(
+    mut text_query: Query<(&mut Text, &mut Style, &SpiderText)>,
+    spider_query: Query<(&Transform, &Spider)>,
+) {
+    for (mut text, mut style, spider_text) in &mut text_query {
+        if let Ok((transform, spider)) = spider_query.get(spider_text.spider) {
+            let x = transform.translation.x;
+            let y = transform.translation.y;
+            let scale = 1. + spider.level as f32;
+            style.position = if spider_text.above {
+                UiRect {
+                    left: Val::Px(WINDOW_WIDTH / 2. + x - scale * SPIDER_RADIUS_PX / 2.),
+                    top: Val::Px(WINDOW_HEIGHT / 2. - y - scale * SPIDER_RADIUS_PX - 16.),
+                    ..default()
+                }
+            } else {
+                UiRect {
+                    left: Val::Px(
+                        WINDOW_WIDTH / 2. + x - scale * SPIDER_RADIUS_PX / 2. - scale * 8.,
+                    ),
+                    top: Val::Px(WINDOW_HEIGHT / 2. - y + scale * SPIDER_RADIUS_PX - 16.),
+                    ..default()
+                }
+            };
+            text.sections[0].style.font_size = 12. + spider.level as f32 * 4.;
+            text.sections[1].style.font_size = 24. + spider.level as f32 * 8.;
+        }
+    }
+}
+
 fn despawn_old_slime_text(
     mut commands: Commands,
     mut text_query: Query<(Entity, &SlimeText)>,
@@ -662,15 +832,59 @@ fn despawn_old_slime_text(
     }
 }
 
+fn despawn_old_spider_text(
+    mut commands: Commands,
+    mut text_query: Query<(Entity, &SpiderText)>,
+    spider_query: Query<&Spider>,
+) {
+    for (entity, spider_text) in &mut text_query {
+        if spider_query.get(spider_text.spider).is_err() {
+            commands.entity(entity).despawn_recursive();
+        }
+    }
+}
+
 fn spawn_initial_slimes(windows: Res<Windows>, mut events: EventWriter<SpawnSlimeEvent>) {
     let mut rng = rand::thread_rng();
     let window = windows.get_primary().unwrap();
-    for &color in SlimeColor::ALL.iter() {
-        let x = rng.gen_range(0.0..window.width()) - window.width() / 2.;
-        let y = rng.gen_range(0.0..window.height()) - window.height() / 2.;
-        events.send(SpawnSlimeEvent {
-            slime: Slime { color, size: 1 },
-            position: 0.5 * Vec2::new(x, y),
+    for _ in 0..2 {
+        for &color in SlimeColor::ALL.iter() {
+            let x = rng.gen_range(0.0..window.width()) - window.width() / 2.;
+            let y = rng.gen_range(0.0..window.height()) - window.height() / 2.;
+            events.send(SpawnSlimeEvent {
+                slime: Slime { color, size: 1 },
+                position: 0.9 * Vec2::new(x, y),
+            });
+        }
+    }
+}
+
+fn setup_spider_spawn_timer(mut commands: Commands) {
+    commands.insert_resource(SpiderSpawnTimer(Timer::new(
+        std::time::Duration::from_secs_f32(5.),
+        true,
+    )));
+}
+
+fn spider_spawn_timer(
+    time: Res<Time>,
+    mut timer: ResMut<SpiderSpawnTimer>,
+    mut events: EventWriter<SpawnSpiderEvent>,
+) {
+    let mut rng = thread_rng();
+    let level = rng.gen_range(1..5);
+    if timer.0.tick(time.delta()).just_finished() {
+        events.send(SpawnSpiderEvent {
+            spider: Spider {
+                level,
+                weakness: SlimeColor::ALL[rng.gen_range(0..8)],
+                speed: 60.,
+                // speed: rng.gen_range(40.0..70.0),
+            },
+            position: Vec2::new(
+                WINDOW_WIDTH / 2. + (1. + level as f32) * SPIDER_RADIUS_PX,
+                rng.gen_range((-WINDOW_HEIGHT / 3.)..WINDOW_HEIGHT / 3.),
+            ),
         });
     }
 }
@@ -694,7 +908,7 @@ fn setup(
         (SlimeColor::Blue, "blue"),
         (SlimeColor::Green, "green"),
         (SlimeColor::Yellow, "yellow"),
-        (SlimeColor::Magenta, "purple"),
+        (SlimeColor::Purple, "purple"),
         (SlimeColor::Cyan, "aqua"),
     ] {
         let texture = asset_server.load(&format!("slime/slime_{color_str}.png"));
@@ -706,7 +920,8 @@ fn setup(
         texture_atlases: slime_texture_atlases,
     });
 
-    let texture = asset_server.load("spider/spider_origin.png");
+    // spider resources
+    let texture = asset_server.load("spider/spider_gray.png");
     let atlas = TextureAtlas::from_grid(texture, Vec2::new(40.0, 40.0), 8, 7);
     let atlas_handle = texture_atlases.add(atlas);
     commands.insert_resource(SpiderResources {
