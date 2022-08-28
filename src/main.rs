@@ -81,7 +81,11 @@ fn main() {
                 .with_system(despawn_other_text),
         )
         .add_system_set(SystemSet::on_update(AppState::GameOver).with_system(restart_game_on_click))
-        .add_system_set(SystemSet::on_exit(AppState::GameOver).with_system(despawn_game_over_menu).with_system(despawn_all_entities))
+        .add_system_set(
+            SystemSet::on_exit(AppState::GameOver)
+                .with_system(despawn_game_over_menu)
+                .with_system(despawn_all_entities),
+        )
         .run();
 }
 
@@ -102,7 +106,7 @@ const INSTRUCTIONS: [&str; 4] = [
     "Drag  slimes  together  to  form  new  slimes.",
     "Drag  slimes  onto  spiders  to  attack  them.",
     "Defeat  spiders  before  they  reach  the  garden.",
-    "Click anywhere to begin.",
+    "Click  anywhere  to  begin.",
 ];
 
 fn setup_main_menu(mut commands: Commands, asset_server: Res<AssetServer>) {
@@ -169,7 +173,7 @@ fn setup_game_over_menu(
             parent.spawn_bundle(
                 TextBundle::from_section(
                     format!(
-                        "GAME  OVER\n\nSpiders  defeated:  {}\n\nClick anywhere to play again.",
+                        "GAME  OVER\n\nSpiders  defeated:  {}\n\nClick  anywhere  to  play  again.",
                         score.spiders_killed
                     ),
                     TextStyle {
@@ -186,7 +190,10 @@ fn setup_game_over_menu(
         });
 }
 
-fn restart_game_on_click(mut mouse_input: ResMut<Input<MouseButton>>, mut state: ResMut<State<AppState>>) {
+fn restart_game_on_click(
+    mut mouse_input: ResMut<Input<MouseButton>>,
+    mut state: ResMut<State<AppState>>,
+) {
     if mouse_input.just_pressed(MouseButton::Left) {
         mouse_input.reset_all();
         state.set(AppState::InGame).expect("could not set state");
@@ -248,6 +255,7 @@ struct SpiderSpawnTimer(Timer);
 struct ScoreResource {
     survival_time: Stopwatch,
     spiders_killed: u32,
+    spiders_spawned: u32,
 }
 
 #[derive(Component)]
@@ -1029,25 +1037,43 @@ fn spawn_initial_slimes(windows: Res<Windows>, mut events: EventWriter<SpawnSlim
 }
 
 fn setup_spider_spawn_timer(mut commands: Commands) {
+    let mut timer = Timer::new(std::time::Duration::from_secs_f32(5.0), false);
+    timer.set_elapsed(std::time::Duration::from_secs_f32(3.0));
     commands.insert_resource(SpiderSpawnTimer(Timer::new(
         std::time::Duration::from_secs_f32(5.),
-        true,
+        false,
     )));
 }
 
 fn spider_spawn_timer(
     time: Res<Time>,
+    mut score: ResMut<ScoreResource>,
     mut timer: ResMut<SpiderSpawnTimer>,
     mut events: EventWriter<SpawnSpiderEvent>,
 ) {
     let mut rng = thread_rng();
-    let level = rng.gen_range(1..5);
+    let level = if score.spiders_spawned < 3 {
+        rng.gen_range(2..3)
+    } else if score.spiders_spawned < 8 {
+        rng.gen_range(2..6)
+    } else if score.spiders_spawned < 15 {
+        rng.gen_range(3..6)
+    } else if score.spiders_spawned < 20 {
+        rng.gen_range(4..6)
+    } else {
+        5
+    };
     if timer.0.tick(time.delta()).just_finished() {
+        score.spiders_spawned += 1;
+        timer.0 = Timer::new(
+            std::time::Duration::from_secs_f32(5.0 - 0.1 * score.spiders_spawned as f32),
+            false,
+        );
         events.send(SpawnSpiderEvent {
             spider: Spider {
                 level,
                 weakness: SlimeColor::ALL[rng.gen_range(0..8)],
-                speed: 60.,
+                speed: 60.0 + 2. * score.spiders_spawned as f32,
                 // speed: rng.gen_range(40.0..70.0),
             },
             position: Vec2::new(
@@ -1139,6 +1165,7 @@ fn reset_score(mut commands: Commands) {
     commands.insert_resource(ScoreResource {
         survival_time: Stopwatch::new(),
         spiders_killed: 0,
+        spiders_spawned: 0,
     });
 }
 
