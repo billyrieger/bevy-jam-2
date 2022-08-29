@@ -1,5 +1,5 @@
 use bevy::{prelude::*, render::texture::ImageSettings, utils::HashMap};
-use bevy_kira_audio::prelude::*;
+// use bevy_kira_audio::prelude::*;
 use bevy_prototype_lyon::prelude::*;
 use bevy_rapier2d::prelude::*;
 use rand::{
@@ -40,7 +40,7 @@ fn main() {
         .add_plugin(RapierPhysicsPlugin::<NoUserData>::pixels_per_meter(
             PIXELS_PER_METER,
         ))
-        .add_plugin(AudioPlugin)
+        // .add_plugin(AudioPlugin)
         .add_state(AppState::PreGame)
         .add_startup_system(setup)
         // .add_startup_system(draw_garden_line)
@@ -342,13 +342,13 @@ struct FontResources {
     game: Handle<Font>,
 }
 
-#[derive(Default)]
-struct AudioResources {
-    grab: Handle<AudioSource>,
-    combine: Handle<AudioSource>,
-    attack_success: Handle<AudioSource>,
-    attack_failure: Handle<AudioSource>,
-}
+// #[derive(Default)]
+// struct AudioResources {
+//     grab: Handle<AudioSource>,
+//     combine: Handle<AudioSource>,
+//     attack_success: Handle<AudioSource>,
+//     attack_failure: Handle<AudioSource>,
+// }
 
 #[derive(Component)]
 struct GardenLine;
@@ -476,8 +476,8 @@ fn drag_start(
     mut windows: ResMut<Windows>,
     mouse_input: Res<Input<MouseButton>>,
     mouse_position: Res<MousePosition>,
-    audio: Res<Audio>,
-    audio_resources: Res<AudioResources>,
+    // audio: Res<Audio>,
+    // audio_resources: Res<AudioResources>,
     mut draggable_query: Query<(
         &mut Transform,
         &Interactable,
@@ -493,7 +493,7 @@ fn drag_start(
             &mut draggable_query
         {
             if transform.translation.truncate().distance(mouse_pos) < draggable.activation_radius {
-                audio.play(audio_resources.grab.clone());
+                // audio.play(audio_resources.grab.clone());
                 drag_active.0 = true;
                 hover_active.0 = false;
                 transform.translation.z = DRAG_LAYER;
@@ -577,8 +577,8 @@ fn combine(
     mut commands: Commands,
     mut score: ResMut<ScoreResource>,
     mut combine_events: EventReader<CombineEvent>,
-    audio: Res<Audio>,
-    audio_resources: Res<AudioResources>,
+    // audio: Res<Audio>,
+    // audio_resources: Res<AudioResources>,
     slime_query: Query<&Slime>,
     spider_query: Query<&Spider>,
     mut slime_events: EventWriter<SpawnSlimeEvent>,
@@ -586,7 +586,7 @@ fn combine(
     let mut rng = rand::thread_rng();
     for ev in combine_events.iter() {
         if let Ok([base_slime, addition_slime]) = slime_query.get_many([ev.base, ev.addition]) {
-            audio.play(audio_resources.combine.clone());
+            // audio.play(audio_resources.combine.clone());
             let new_size = base_slime.size + addition_slime.size;
             let new_color = addition_slime.color;
             let random_color = SlimeColor::ALL[rng.gen_range(0..8)];
@@ -620,11 +620,11 @@ fn combine(
             (spider_query.get(ev.base), slime_query.get(ev.addition))
         {
             if spider.level <= slime.size && spider.weakness == slime.color {
-                audio.play(audio_resources.attack_success.clone());
+                // audio.play(audio_resources.attack_success.clone());
                 score.spiders_killed += 1;
                 commands.entity(ev.base).despawn_recursive();
             } else {
-                audio.play(audio_resources.attack_failure.clone());
+                // audio.play(audio_resources.attack_failure.clone());
             }
             for size in [slime.size / 2, slime.size - slime.size / 2] {
                 if size > 0 {
@@ -1205,8 +1205,10 @@ fn spider_spawn_timer(
     mut events: EventWriter<SpawnSpiderEvent>,
 ) {
     let mut rng = thread_rng();
-    let level = if score.spiders_spawned < 3 {
-        rng.gen_range(2..3)
+    let level = if score.spiders_spawned < 2 {
+        2
+    } else if score.spiders_spawned < 3 {
+        3
     } else if score.spiders_spawned < 8 {
         rng.gen_range(2..5)
     } else if score.spiders_spawned < 11 {
@@ -1325,12 +1327,12 @@ fn setup(
         game: asset_server.load("fonts/Kenney Pixel Square.ttf"),
     });
 
-    commands.insert_resource(AudioResources {
-        grab: asset_server.load("audio/select_001.ogg"),
-        combine: asset_server.load("audio/drop_004.ogg"),
-        attack_success: asset_server.load("audio/confirmation_001.ogg"),
-        attack_failure: asset_server.load("audio/error_008.ogg"),
-    });
+    // commands.insert_resource(AudioResources {
+    //     grab: asset_server.load("audio/select_001.ogg"),
+    //     combine: asset_server.load("audio/drop_004.ogg"),
+    //     attack_success: asset_server.load("audio/confirmation_001.ogg"),
+    //     attack_failure: asset_server.load("audio/error_008.ogg"),
+    // });
 }
 
 fn reset_score(mut commands: Commands) {
