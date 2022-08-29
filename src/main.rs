@@ -1,7 +1,6 @@
-use bevy::{prelude::*, render::texture::ImageSettings, time::Stopwatch, utils::HashMap};
+use bevy::{prelude::*, render::texture::ImageSettings, utils::HashMap};
 use bevy_prototype_lyon::prelude::*;
 use bevy_rapier2d::prelude::*;
-use itertools::Itertools;
 use rand::{
     distributions::{Distribution, Uniform},
     thread_rng, Rng,
@@ -24,6 +23,9 @@ const SPIDER_RADIUS_PX: f32 = 18.;
 
 const GARDEN_X: f32 = -WINDOW_WIDTH / 2. + 32. * 5.;
 
+const BUTTON_COLOR: Color = Color::GRAY;
+const BUTTON_COLOR_HOVER: Color = Color::DARK_GRAY;
+
 fn main() {
     App::new()
         .insert_resource(WindowDescriptor { ..default() })
@@ -45,8 +47,8 @@ fn main() {
         .add_system(sync_mouse_position)
         .add_system(despawn_old_slime_text)
         .add_system(despawn_old_spider_text)
+        .add_system(button_system)
         .add_system_set(SystemSet::on_enter(AppState::PreGame).with_system(setup_main_menu))
-        .add_system_set(SystemSet::on_update(AppState::PreGame).with_system(start_game_on_click))
         .add_system_set(SystemSet::on_exit(AppState::PreGame).with_system(despawn_main_menu))
         .add_system_set(
             SystemSet::on_enter(AppState::InGame)
@@ -80,7 +82,6 @@ fn main() {
                 .with_system(remove_all_hover)
                 .with_system(despawn_other_text),
         )
-        .add_system_set(SystemSet::on_update(AppState::GameOver).with_system(restart_game_on_click))
         .add_system_set(
             SystemSet::on_exit(AppState::GameOver)
                 .with_system(despawn_game_over_menu)
@@ -102,11 +103,13 @@ struct MainMenu;
 #[derive(Component)]
 struct GameOverMenu;
 
-const INSTRUCTIONS: [&str; 4] = [
+#[derive(Component)]
+struct PlayButton;
+
+const INSTRUCTIONS: [&str; 3] = [
     "Drag  slimes  together  to  form  new  slimes.",
     "Drag  slimes  onto  spiders  to  attack  them.",
     "Defeat  spiders  before  they  reach  the  garden.",
-    "Click  anywhere  to  begin.",
 ];
 
 fn setup_main_menu(mut commands: Commands, asset_server: Res<AssetServer>) {
@@ -116,6 +119,7 @@ fn setup_main_menu(mut commands: Commands, asset_server: Res<AssetServer>) {
                 size: Size::new(Val::Percent(100.0), Val::Percent(100.0)),
                 justify_content: JustifyContent::Center,
                 align_items: AlignItems::Center,
+                flex_direction: FlexDirection::ColumnReverse,
                 ..default()
             },
             color: Color::rgba(0.0, 0.0, 0.0, 0.9).into(),
@@ -123,26 +127,87 @@ fn setup_main_menu(mut commands: Commands, asset_server: Res<AssetServer>) {
         })
         .insert(MainMenu)
         .with_children(|parent| {
+            let font = asset_server.load("fonts/Kenney Pixel.ttf");
+            let sections = INSTRUCTIONS.iter().map(|s| TextSection {
+                value: s.to_string(),
+                style: TextStyle {
+                    font: font.clone(),
+                    font_size: 32.,
+                    color: Color::WHITE,
+                },
+            });
             parent.spawn_bundle(
                 TextBundle::from_section(
-                    INSTRUCTIONS.iter().join("\n\n"),
+                    "SLIMES vs SPIDERS",
                     TextStyle {
-                        font: asset_server.load("fonts/Kenney Pixel.ttf"),
-                        font_size: 32.,
+                        font: font.clone(),
+                        font_size: 64.,
                         color: Color::WHITE,
                     },
                 )
                 .with_style(Style {
-                    margin: UiRect::all(Val::Px(5.0)),
+                    margin: UiRect::all(Val::Px(32.0)),
                     ..default()
                 }),
             );
+            for section in sections {
+                parent.spawn_bundle(TextBundle::from_sections([section]).with_style(Style {
+                    margin: UiRect::all(Val::Px(16.0)),
+                    ..default()
+                }));
+            }
+            parent
+                .spawn_bundle(ButtonBundle {
+                    style: Style {
+                        margin: UiRect::all(Val::Px(32.0)),
+                        // horizontally center child text
+                        justify_content: JustifyContent::Center,
+                        // vertically center child text
+                        align_items: AlignItems::Center,
+                        ..default()
+                    },
+                    color: Color::GRAY.into(),
+                    ..default()
+                })
+                .insert(PlayButton)
+                .with_children(|parent| {
+                    parent.spawn_bundle(
+                        TextBundle::from_section(
+                            "Click to start",
+                            TextStyle {
+                                font: font.clone(),
+                                font_size: 32.0,
+                                color: Color::WHITE.into(),
+                            },
+                        )
+                        .with_style(Style {
+                            margin: UiRect::all(Val::Px(16.0)),
+                            ..default()
+                        }),
+                    );
+                });
         });
 }
 
-fn start_game_on_click(mouse_input: Res<Input<MouseButton>>, mut state: ResMut<State<AppState>>) {
-    if mouse_input.just_pressed(MouseButton::Left) {
-        state.set(AppState::InGame).expect("could not set state");
+fn button_system(
+    mut state: ResMut<State<AppState>>,
+    mut interaction_query: Query<
+        (&Interaction, &mut UiColor),
+        (Changed<Interaction>, With<Button>),
+    >,
+) {
+    for (interaction, mut color) in &mut interaction_query {
+        match *interaction {
+            Interaction::Hovered => {
+                *color = BUTTON_COLOR_HOVER.into();
+            }
+            Interaction::None => {
+                *color = BUTTON_COLOR.into();
+            }
+            Interaction::Clicked => {
+                state.set(AppState::InGame).expect("could not set state");
+            }
+        }
     }
 }
 
@@ -163,6 +228,7 @@ fn setup_game_over_menu(
                 size: Size::new(Val::Percent(100.0), Val::Percent(100.0)),
                 justify_content: JustifyContent::Center,
                 align_items: AlignItems::Center,
+                flex_direction: FlexDirection::ColumnReverse,
                 ..default()
             },
             color: Color::rgba(0.0, 0.0, 0.0, 0.9).into(),
@@ -170,34 +236,60 @@ fn setup_game_over_menu(
         })
         .insert(GameOverMenu)
         .with_children(|parent| {
-            parent.spawn_bundle(
-                TextBundle::from_section(
-                    format!(
-                        "GAME  OVER\n\nSpiders  defeated:  {}\n\nClick  anywhere  to  play  again.",
-                        score.spiders_killed
-                    ),
-                    TextStyle {
-                        font: asset_server.load("fonts/Kenney Pixel.ttf"),
-                        font_size: 32.,
-                        color: Color::WHITE,
-                    },
-                )
-                .with_style(Style {
-                    margin: UiRect::all(Val::Px(5.0)),
+            let font = asset_server.load("fonts/Kenney Pixel.ttf");
+            let game_over_text = TextSection {
+                value: "Game  over!".to_owned(),
+                style: TextStyle {
+                    font: font.clone(),
+                    font_size: 32.,
+                    color: Color::WHITE,
+                },
+            };
+            let defeated_text = TextSection {
+                value: format!("Spiders  defeated:  {}", score.spiders_killed),
+                style: TextStyle {
+                    font: font.clone(),
+                    font_size: 32.,
+                    color: Color::WHITE,
+                },
+            };
+            for section in [game_over_text, defeated_text] {
+                parent.spawn_bundle(TextBundle::from_sections([section]).with_style(Style {
+                    margin: UiRect::all(Val::Px(16.0)),
                     ..default()
-                }),
-            );
+                }));
+            }
+            parent
+                .spawn_bundle(ButtonBundle {
+                    style: Style {
+                        margin: UiRect::all(Val::Px(16.0)),
+                        // horizontally center child text
+                        justify_content: JustifyContent::Center,
+                        // vertically center child text
+                        align_items: AlignItems::Center,
+                        ..default()
+                    },
+                    color: BUTTON_COLOR.into(),
+                    ..default()
+                })
+                .insert(PlayButton)
+                .with_children(|parent| {
+                    parent.spawn_bundle(
+                        TextBundle::from_section(
+                            "Click  to  play  again",
+                            TextStyle {
+                                font: font.clone(),
+                                font_size: 32.0,
+                                color: Color::WHITE.into(),
+                            },
+                        )
+                        .with_style(Style {
+                            margin: UiRect::all(Val::Px(16.0)),
+                            ..default()
+                        }),
+                    );
+                });
         });
-}
-
-fn restart_game_on_click(
-    mut mouse_input: ResMut<Input<MouseButton>>,
-    mut state: ResMut<State<AppState>>,
-) {
-    if mouse_input.just_pressed(MouseButton::Left) {
-        mouse_input.reset_all();
-        state.set(AppState::InGame).expect("could not set state");
-    }
 }
 
 fn despawn_game_over_menu(
@@ -253,7 +345,6 @@ struct Spider {
 struct SpiderSpawnTimer(Timer);
 
 struct ScoreResource {
-    survival_time: Stopwatch,
     spiders_killed: u32,
     spiders_spawned: u32,
 }
@@ -543,7 +634,7 @@ impl SlimeColor {
             SlimeColor::Cyan => Color::rgb_u8(0, 200, 221),
             SlimeColor::Purple => Color::rgb_u8(159, 84, 205),
             SlimeColor::Yellow => Color::rgb_u8(232, 208, 85),
-            SlimeColor::White => Color::rgb_u8(217, 217, 217),
+            SlimeColor::White => Color::WHITE,
             SlimeColor::Black => Color::rgb_u8(11, 11, 11),
         }
     }
@@ -636,7 +727,7 @@ fn spawn_background_tiles(
     // the grass tiles are the first four tiles of the first four rows, 4 * 4 = 16.
     let index_distribution = Uniform::from(0..16);
     let mut rng = rand::thread_rng();
-    for x in -10..=10 {
+    for x in -6..=10 {
         for y in -10..=10 {
             let index = index_distribution.sample(&mut rng);
             let tile_row = index / 4;
@@ -801,6 +892,19 @@ fn slime_spawner(
                 text: Text::from_sections([lvl_text, number_text]),
                 style: Style {
                     position_type: PositionType::Absolute,
+                    position: UiRect {
+                        left: Val::Px(
+                            WINDOW_WIDTH / 2. + ev.position.x
+                                - (1. + ev.slime.size as f32) * SLIME_RADIUS_PX / 2.,
+                        ),
+                        top: Val::Px(
+                            WINDOW_HEIGHT / 2.
+                                - ev.position.y
+                                - (1. + ev.slime.size as f32) * SLIME_RADIUS_PX
+                                - 16.,
+                        ),
+                        ..default()
+                    },
                     ..default()
                 },
                 // transform: Transform::from_translation(Vec3::new(0., 0., 10.)),
@@ -837,6 +941,7 @@ fn spider_spawner(
             .insert(LockedAxes::ROTATION_LOCKED)
             .insert(CollisionGroups::default())
             .insert(Restitution::coefficient(0.5))
+            .insert(Friction::new(0.0))
             .insert(Velocity::linear(Vec2::new(-ev.spider.speed, 0.)))
             .with_children(|parent| {
                 parent
@@ -864,19 +969,11 @@ fn spider_spawner(
             },
         };
         let number_text = TextSection {
-            value: format!("{}", ev.spider.level),
+            value: format!("{} ", ev.spider.level),
             style: TextStyle {
                 font: font.clone(),
                 font_size: 32.,
                 color: Color::WHITE,
-            },
-        };
-        let weakness_text = TextSection {
-            value: "WEAK TO ".to_owned(),
-            style: TextStyle {
-                font: font.clone(),
-                font_size: 16.,
-                color: Color::rgba(1.0, 1.0, 1.0, 0.5),
             },
         };
         let color_text = TextSection {
@@ -893,7 +990,7 @@ fn spider_spawner(
                     size: Vec2::new(radius_px * 2., radius_px * 2.),
                     ..default()
                 },
-                text: Text::from_sections([lvl_text, number_text]),
+                text: Text::from_sections([lvl_text, number_text, color_text]),
                 style: Style {
                     position_type: PositionType::Absolute,
                     position: UiRect {
@@ -913,34 +1010,34 @@ fn spider_spawner(
                 spider: spider_entity,
                 above: true,
             });
-        commands
-            .spawn_bundle(TextBundle {
-                node: Node {
-                    size: Vec2::new(radius_px * 2., radius_px * 2.),
-                    ..default()
-                },
-                text: Text::from_sections([weakness_text, color_text]),
-                style: Style {
-                    position_type: PositionType::Absolute,
-                    position: UiRect {
-                        left: Val::Px(
-                            WINDOW_WIDTH / 2. + ev.position.x
-                                - scale * SPIDER_RADIUS_PX / 2.
-                                - scale * 8.,
-                        ),
-                        top: Val::Px(
-                            WINDOW_HEIGHT / 2. - ev.position.y + scale * SPIDER_RADIUS_PX - 16.,
-                        ),
-                        ..default()
-                    },
-                    ..default()
-                },
-                ..default()
-            })
-            .insert(SpiderText {
-                spider: spider_entity,
-                above: false,
-            });
+        // commands
+        //     .spawn_bundle(TextBundle {
+        //         node: Node {
+        //             size: Vec2::new(radius_px * 2., radius_px * 2.),
+        //             ..default()
+        //         },
+        //         text: Text::from_sections([weakness_text, color_text]),
+        //         style: Style {
+        //             position_type: PositionType::Absolute,
+        //             position: UiRect {
+        //                 left: Val::Px(
+        //                     WINDOW_WIDTH / 2. + ev.position.x
+        //                         - scale * SPIDER_RADIUS_PX / 2.
+        //                         - scale * 8.,
+        //                 ),
+        //                 top: Val::Px(
+        //                     WINDOW_HEIGHT / 2. - ev.position.y + scale * SPIDER_RADIUS_PX - 16.,
+        //                 ),
+        //                 ..default()
+        //             },
+        //             ..default()
+        //         },
+        //         ..default()
+        //     })
+        //     .insert(SpiderText {
+        //         spider: spider_entity,
+        //         above: false,
+        //     });
     }
 }
 
@@ -993,6 +1090,7 @@ fn sync_spider_text_position(
             };
             text.sections[0].style.font_size = 12. + spider.level as f32 * 4.;
             text.sections[1].style.font_size = 24. + spider.level as f32 * 8.;
+            text.sections[2].style.font_size = 24. + spider.level as f32 * 8.;
         }
     }
 }
@@ -1038,7 +1136,7 @@ fn spawn_initial_slimes(windows: Res<Windows>, mut events: EventWriter<SpawnSlim
 
 fn setup_spider_spawn_timer(mut commands: Commands) {
     let mut timer = Timer::new(std::time::Duration::from_secs_f32(5.0), false);
-    timer.set_elapsed(std::time::Duration::from_secs_f32(3.0));
+    timer.set_elapsed(std::time::Duration::from_secs_f32(4.0));
     commands.insert_resource(SpiderSpawnTimer(Timer::new(
         std::time::Duration::from_secs_f32(5.),
         false,
@@ -1055,6 +1153,8 @@ fn spider_spawn_timer(
     let level = if score.spiders_spawned < 3 {
         rng.gen_range(2..3)
     } else if score.spiders_spawned < 8 {
+        rng.gen_range(2..5)
+    } else if score.spiders_spawned < 11 {
         rng.gen_range(2..6)
     } else if score.spiders_spawned < 15 {
         rng.gen_range(3..6)
@@ -1163,7 +1263,6 @@ fn setup(
 
 fn reset_score(mut commands: Commands) {
     commands.insert_resource(ScoreResource {
-        survival_time: Stopwatch::new(),
         spiders_killed: 0,
         spiders_spawned: 0,
     });
@@ -1171,12 +1270,32 @@ fn reset_score(mut commands: Commands) {
 
 fn setup_physics(mut rapier_config: ResMut<RapierConfiguration>, mut commands: Commands) {
     rapier_config.gravity = Vec2::ZERO;
-    let wall_size = 20.;
+    let wall_size = 100.;
     for (width_x, width_y, pos_x, pos_y) in [
-        (wall_size, WINDOW_HEIGHT, -WINDOW_WIDTH / 2., 0.),
-        (wall_size, WINDOW_HEIGHT, WINDOW_WIDTH / 2., 0.),
-        (WINDOW_WIDTH, wall_size, 0., -WINDOW_HEIGHT / 2.),
-        (WINDOW_WIDTH, wall_size, 0., WINDOW_HEIGHT / 2.),
+        (
+            wall_size,
+            2.0 * WINDOW_HEIGHT,
+            -WINDOW_WIDTH / 2. - wall_size / 2.,
+            0.,
+        ),
+        (
+            wall_size,
+            2.0 * WINDOW_HEIGHT,
+            WINDOW_WIDTH / 2. + wall_size / 2.,
+            0.,
+        ),
+        (
+            2.0 * WINDOW_WIDTH,
+            wall_size,
+            0.,
+            -WINDOW_HEIGHT / 2. - wall_size / 2.,
+        ),
+        (
+            2.0 * WINDOW_WIDTH,
+            wall_size,
+            0.,
+            WINDOW_HEIGHT / 2. + wall_size / 2.,
+        ),
     ] {
         commands
             .spawn()
