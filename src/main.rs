@@ -1,4 +1,5 @@
 use bevy::{prelude::*, render::texture::ImageSettings, utils::HashMap};
+use bevy_kira_audio::prelude::*;
 use bevy_prototype_lyon::prelude::*;
 use bevy_rapier2d::prelude::*;
 use rand::{
@@ -39,6 +40,7 @@ fn main() {
         .add_plugin(RapierPhysicsPlugin::<NoUserData>::pixels_per_meter(
             PIXELS_PER_METER,
         ))
+        .add_plugin(AudioPlugin)
         .add_state(AppState::PreGame)
         .add_startup_system(setup)
         // .add_startup_system(draw_garden_line)
@@ -58,6 +60,7 @@ fn main() {
         )
         .add_system_set(
             SystemSet::on_update(AppState::InGame)
+                .with_system(set_mouse_icon)
                 .with_system(animate_sprites)
                 .with_system(slime_drag_animation)
                 .with_system(add_activation_circle)
@@ -80,6 +83,7 @@ fn main() {
                 .with_system(setup_game_over_menu)
                 .with_system(set_all_velocities_to_zero)
                 .with_system(remove_all_hover)
+                .with_system(reset_cursor_icon)
                 .with_system(despawn_other_text),
         )
         .add_system_set(
@@ -107,12 +111,12 @@ struct GameOverMenu;
 struct PlayButton;
 
 const INSTRUCTIONS: [&str; 3] = [
-    "Drag  slimes  together  to  form  new  slimes.",
-    "Drag  slimes  onto  spiders  to  attack  them.",
+    "Drag  a  slime  onto  another  slime  to  combine  them.",
+    "Drag  a  slime  onto  a  spider  to  attack  it.",
     "Defeat  spiders  before  they  reach  the  garden.",
 ];
 
-fn setup_main_menu(mut commands: Commands, asset_server: Res<AssetServer>) {
+fn setup_main_menu(mut commands: Commands, fonts: Res<FontResources>) {
     commands
         .spawn_bundle(NodeBundle {
             style: Style {
@@ -127,7 +131,7 @@ fn setup_main_menu(mut commands: Commands, asset_server: Res<AssetServer>) {
         })
         .insert(MainMenu)
         .with_children(|parent| {
-            let font = asset_server.load("fonts/Kenney Pixel.ttf");
+            let font = fonts.menu.clone();
             let sections = INSTRUCTIONS.iter().map(|s| TextSection {
                 value: s.to_string(),
                 style: TextStyle {
@@ -219,7 +223,7 @@ fn despawn_main_menu(mut commands: Commands, main_menu_query: Query<Entity, With
 
 fn setup_game_over_menu(
     mut commands: Commands,
-    asset_server: Res<AssetServer>,
+    fonts: Res<FontResources>,
     score: Res<ScoreResource>,
 ) {
     commands
@@ -236,7 +240,7 @@ fn setup_game_over_menu(
         })
         .insert(GameOverMenu)
         .with_children(|parent| {
-            let font = asset_server.load("fonts/Kenney Pixel.ttf");
+            let font = fonts.menu.clone();
             let game_over_text = TextSection {
                 value: "Game  over!".to_owned(),
                 style: TextStyle {
@@ -332,6 +336,20 @@ struct SpiderResources {
     texture_atlas: Handle<TextureAtlas>,
 }
 
+#[derive(Default)]
+struct FontResources {
+    menu: Handle<Font>,
+    game: Handle<Font>,
+}
+
+#[derive(Default)]
+struct AudioResources {
+    grab: Handle<AudioSource>,
+    combine: Handle<AudioSource>,
+    attack_success: Handle<AudioSource>,
+    attack_failure: Handle<AudioSource>,
+}
+
 #[derive(Component)]
 struct GardenLine;
 
@@ -362,6 +380,27 @@ struct HoverActive(bool);
 
 #[derive(Component)]
 struct ActivationCircle;
+
+fn set_mouse_icon(
+    mut windows: ResMut<Windows>,
+    drag_query: Query<&DragActive>,
+    hover_query: Query<&HoverActive, With<DragActive>>,
+) {
+    let window = windows.primary_mut();
+    for drag_active in &drag_query {
+        if drag_active.0 {
+            window.set_cursor_icon(CursorIcon::Grabbing);
+            return;
+        }
+    }
+    for hover_active in &hover_query {
+        if hover_active.0 {
+            window.set_cursor_icon(CursorIcon::Grab);
+            return;
+        }
+    }
+    window.set_cursor_icon(CursorIcon::Default);
+}
 
 fn mouse_hover(
     mouse_position: Res<MousePosition>,
@@ -434,8 +473,11 @@ fn add_activation_circle(
 }
 
 fn drag_start(
+    mut windows: ResMut<Windows>,
     mouse_input: Res<Input<MouseButton>>,
     mouse_position: Res<MousePosition>,
+    audio: Res<Audio>,
+    audio_resources: Res<AudioResources>,
     mut draggable_query: Query<(
         &mut Transform,
         &Interactable,
@@ -444,16 +486,19 @@ fn drag_start(
         &mut CollisionGroups,
     )>,
 ) {
+    let window = windows.primary_mut();
     if mouse_input.just_pressed(MouseButton::Left) {
         let mouse_pos = mouse_position.0.unwrap();
         for (mut transform, draggable, mut drag_active, mut hover_active, mut collision_groups) in
             &mut draggable_query
         {
             if transform.translation.truncate().distance(mouse_pos) < draggable.activation_radius {
+                audio.play(audio_resources.grab.clone());
                 drag_active.0 = true;
                 hover_active.0 = false;
                 transform.translation.z = DRAG_LAYER;
                 collision_groups.filters = 0;
+                window.set_cursor_icon(CursorIcon::Grabbing);
                 // only drag one thing at a time.
                 break;
             }
@@ -482,6 +527,7 @@ struct CombineEvent {
 }
 
 fn drag_end(
+    mut windows: ResMut<Windows>,
     mouse_position: Res<MousePosition>,
     mouse_input: Res<Input<MouseButton>>,
     mut drag_query: Query<(
@@ -494,7 +540,9 @@ fn drag_end(
     hover_query: Query<(Entity, &HoverActive)>,
     mut events: EventWriter<CombineEvent>,
 ) {
+    let window = windows.primary_mut();
     if mouse_input.just_released(MouseButton::Left) {
+        window.set_cursor_icon(CursorIcon::Default);
         let mut addition_entity: Option<Entity> = None;
         let mut base_entity: Option<Entity> = None;
         for (entity, mut transform, mut drag_active, mut collision_groups, mut velocity) in
@@ -529,6 +577,8 @@ fn combine(
     mut commands: Commands,
     mut score: ResMut<ScoreResource>,
     mut combine_events: EventReader<CombineEvent>,
+    audio: Res<Audio>,
+    audio_resources: Res<AudioResources>,
     slime_query: Query<&Slime>,
     spider_query: Query<&Spider>,
     mut slime_events: EventWriter<SpawnSlimeEvent>,
@@ -536,6 +586,7 @@ fn combine(
     let mut rng = rand::thread_rng();
     for ev in combine_events.iter() {
         if let Ok([base_slime, addition_slime]) = slime_query.get_many([ev.base, ev.addition]) {
+            audio.play(audio_resources.combine.clone());
             let new_size = base_slime.size + addition_slime.size;
             let new_color = addition_slime.color;
             let random_color = SlimeColor::ALL[rng.gen_range(0..8)];
@@ -569,8 +620,11 @@ fn combine(
             (spider_query.get(ev.base), slime_query.get(ev.addition))
         {
             if spider.level <= slime.size && spider.weakness == slime.color {
+                audio.play(audio_resources.attack_success.clone());
                 score.spiders_killed += 1;
                 commands.entity(ev.base).despawn_recursive();
+            } else {
+                audio.play(audio_resources.attack_failure.clone());
             }
             for size in [slime.size / 2, slime.size - slime.size / 2] {
                 if size > 0 {
@@ -818,7 +872,7 @@ struct SpawnSpiderEvent {
 
 fn slime_spawner(
     mut commands: Commands,
-    asset_server: Res<AssetServer>,
+    fonts: Res<FontResources>,
     slime_resources: Res<SlimeResources>,
     mut events: EventReader<SpawnSlimeEvent>,
 ) {
@@ -867,10 +921,11 @@ fn slime_spawner(
                     .insert(SpriteAnimation::slime_idle());
             })
             .id();
+        let font = fonts.game.clone();
         let lvl_text = TextSection {
             value: "LVL ".to_owned(),
             style: TextStyle {
-                font: asset_server.load("fonts/Kenney Pixel Square.ttf"),
+                font: font.clone(),
                 font_size: 16.,
                 color: Color::rgba(1., 1., 1., 0.5),
             },
@@ -878,7 +933,7 @@ fn slime_spawner(
         let number_text = TextSection {
             value: format!("{}", ev.slime.size),
             style: TextStyle {
-                font: asset_server.load("fonts/Kenney Pixel Square.ttf"),
+                font: font.clone(),
                 font_size: 32.,
                 color: Color::WHITE,
             },
@@ -918,7 +973,7 @@ fn slime_spawner(
 
 fn spider_spawner(
     mut commands: Commands,
-    asset_server: Res<AssetServer>,
+    fonts: Res<FontResources>,
     spider_resources: Res<SpiderResources>,
     mut events: EventReader<SpawnSpiderEvent>,
 ) {
@@ -959,7 +1014,7 @@ fn spider_spawner(
                     .insert(SpriteAnimation::spider_walk());
             })
             .id();
-        let font = asset_server.load("fonts/Kenney Pixel Square.ttf");
+        let font = fonts.game.clone();
         let lvl_text = TextSection {
             value: "LVL ".to_owned(),
             style: TextStyle {
@@ -1221,6 +1276,11 @@ fn remove_all_hover(mut query: Query<&mut DrawMode, With<ActivationCircle>>) {
     }
 }
 
+fn reset_cursor_icon(mut windows: ResMut<Windows>) {
+    let window = windows.primary_mut();
+    window.set_cursor_icon(CursorIcon::Default);
+}
+
 fn setup(
     mut commands: Commands,
     asset_server: Res<AssetServer>,
@@ -1258,6 +1318,18 @@ fn setup(
     let atlas_handle = texture_atlases.add(atlas);
     commands.insert_resource(SpiderResources {
         texture_atlas: atlas_handle,
+    });
+
+    commands.insert_resource(FontResources {
+        menu: asset_server.load("fonts/Kenney Pixel.ttf"),
+        game: asset_server.load("fonts/Kenney Pixel Square.ttf"),
+    });
+
+    commands.insert_resource(AudioResources {
+        grab: asset_server.load("audio/select_001.ogg"),
+        combine: asset_server.load("audio/drop_004.ogg"),
+        attack_success: asset_server.load("audio/confirmation_001.ogg"),
+        attack_failure: asset_server.load("audio/error_008.ogg"),
     });
 }
 
